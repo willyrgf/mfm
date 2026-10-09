@@ -28,3 +28,7 @@ SHA-256 source files:
 4d450b18b623560b389ebb48e4124d535eb87b8877cb49e6acc050d35cab9687  crates/kernel/program/src/experiment_bridge.rs
 eb998271adb45cfa98008aa431296072e729dff996fa3e5592ad3f57bc417d40  crates/domains/evm/tests/simplification/holdings.rs
 e0d10234d1b8ec1ae975da93db6235fa59ac844e93796839df9298627731a7c1  crates/domains/evm/tests/simplification/extension.rs
+Review clarification after execution (source hashes unchanged): the phrase
+"native resource qualification" above means selected table presence in phase one.
+Owner-specific table/binding checks execute within A::bind during attachment.
+The tested late wrong-binding and missing-table cases all reject in phase one.

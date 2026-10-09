@@ -1,0 +1,51 @@
+# Independent configured-loop challenge results
+
+Status: focused passing candidate ready for independent review/final coordinator CI. No further edits planned.
+
+Only owned source change: crates/domains/evm/tests/simplification_configured.rs, 982 added physical lines. SHA256 5cd1af247404ddde091f4f1c212d48f1470e74c6df526fc2d39a6a9107767628. Coordinator staged it; this worker made no commits, shared-file edits, manifests/dependencies changes, or main/docs changes.
+
+## Behavior and independent observations
+
+One ConfiguredProgress value holds existing CollectionRequests and successive existing CollectionOutputs. One endomorphic ConfiguredLoop delegates retained holdings validation/interpretation. Preparation runs once per invocation; interpretation uses the existing retained request directly. A 14-line ordinary authoring function receives only progress/Catalog/(ContentRef,Object) sequence and names no adapter/binding/resource/protocol types. It selects exact ReadLeaf<ConfiguredLoop> and appends canonical Objects.
+
+Literal configured sequence scalar31337/genesis[1]/point7[7], Book19/point117, scalar8453/genesis[2]/point19[9] passes through one scalar factory plus one Book factory. Scalar units are 1234500 and42000000000000000000, denominations6/18; Book requested output order retained/empty is42/0, denominations0/0, with original reversed native batch retained. The two scalar networks and points remain independent. Actual observe-entry scalar binding sinks and request sinks prove native arguments before projection. The exact two independent intrinsic descriptor hashes are scalar f4b200270089e1b3653a2faf4dd6bf3ea91e4b93cb515e2a0bcd15cc61166ea6, Book b8d702da6404c593e48b895e17f9c36f8d5d170732fe4230b6242f9a31b24469. Export includes descriptor JSON for independent recomputation, rather than only equality with Catalog-produced refs.
+
+Direct MemoryStore probes observe all4 physical frames: admission and3 completed Reads. All3 retained native originals match independently fixed literal Objects/content digests. Native selected refs and request-relative native arguments are asserted. Cold Catalog reconstruction has the same Program identity; terminal cold read leaves physical head/output identical and performs0 native IO even with empty scalar replies and a hostile wrong-point Book fixture.
+
+Seven negative traces retain distinct causal diagnostics: unknown ref select_leaf/leaf_unavailable; wrong State select_leaf/conflicting_owner; wrong mode select_leaf/mode_mismatch; late wrong owner qualify_binding/value_error/artifact_type_mismatch with exact scalar expected schema and Book actual schema; late same-schema malformed binding qualify_binding/value_error/schema_shape_mismatch; both missing selected resource tables associate/resource_owner_unavailable. Whole-document qualification rejects the late binding/resource cases with both attachment sinks and both native IO sinks at0. Both unselected-owner resource tables remain optional, established by separate successful scalar-only/Book-only runs with both factories still installed.
+
+## Accounting
+
+Production-code LOC change:0. Disposable consuming specimen:+982 lines, including376 lines of full independent literal JSON and606 lines of imports, the small State/authoring/descriptor oracle, scenario assertions and review export. No superseded production implementation/API/test/document is owned or removed by this worker. Reuses existing native owners, CollectionRequest/CollectionOutput semantics, Runtime and MemoryStore; avoids a new provider model, Store wrapper, protocol dispatch, boxed append callback, or global point/snapshot. Necessary complexity added: one endomorphic State, one progress value, a minimal Pure identity State solely for wrong-mode selection, and independent persistence/sink/cause oracles. The existing bridge cutover deletes the typed-binding append API under constructor-author ownership; this fixture does not introduce another append path.
+
+API imports: experimental Builder/Catalog/ReadState/ResourceTable; Program State/PureState/Never/ProposedStateOutcome/limits/error; Values Object/MfmValue/diagnostics/Unsigned256; production EVM checked address/target/chain/anchor/U256/hash; existing IDs/canonical primitives; Runtime; Store/MemoryStore; serde+serde_json and standard Arc/atomic. No new dependency. `expected_leaf` assembles literal domain/mode/State/adapter/order and uses existing native schema codecs/hash primitive, never Catalog/leaf key methods as expected oracle.
+
+## Commands and statuses
+
+Working directory: /tmp/mfm-simplification-followup-71226d68. Rust tools always run inside default Nix shell.
+
+1. nix develop -c cargo-fmt fmt --all — exit0; initial output only dirty Git warning. Shared frozen hashes checked immediately afterwards and unchanged.
+2. MFM_CONFIGURED_EXPORT_PATH=/tmp/mfm-followup-configured-first-export.json nix develop -c cargo test -p mfm-evm --test simplification_configured -- --nocapture > /tmp/mfm-followup-configured-test-01.log 2>&1 — exit0,1 passed. First full export retained unchanged.
+3. Review corrections: avoid interpretation's second preparation; strengthen exact malformed/wrong-owner causes; export observed zero negative counts and successful counts. No observed execution failure prompted these refinements.
+4. nix develop -c cargo-fmt fmt --all > /tmp/mfm-followup-configured-format-02.log 2>&1 — exit0.
+5. MFM_CONFIGURED_EXPORT_PATH=/tmp/mfm-followup-configured-final-export.json nix develop -c cargo test -p mfm-evm --test simplification_configured -- --nocapture > /tmp/mfm-followup-configured-test-02.log 2>&1 — exit0,1 passed.
+6. nix develop -c cargo-fmt fmt --all -- --check > /tmp/mfm-followup-configured-format-check.log 2>&1 — exit0.
+7. git diff --check — exit0 (tracked worktree check; coordinator also reports staged final diff check0).
+8. git diff --no-index --check /dev/null crates/domains/evm/tests/simplification_configured.rs — exit1 with no whitespace output; expected no-index difference status for a new file.
+9. git diff --no-index -- /dev/null crates/domains/evm/tests/simplification_configured.rs > /tmp/mfm-followup-configured.patch — exit1, expected no-index difference status; full owned patch preserved.
+
+No Cargo/Rust test failures occurred. No worker-run CI, Clippy, full workspace or managed IO task is claimed; coordinator owns exact candidate CI. No other focus suites repeated by this worker.
+
+## Evidence paths
+
+Predictions before corrected-port consumption: /tmp/mfm-followup-configured-predictions.md and /tmp/mfm-followup-configured-literals.json, archived by coordinator commit d7263e44. Frozen port doc main commit954f08be; all3 shared source hashes matched it before/after.
+
+First raw run: /tmp/mfm-followup-configured-test-01.log; first full JSON /tmp/mfm-followup-configured-first-export.json (SHA2568f2cdb780b0f35114d295c8132e59d218c73eb05d069a6e601095db96fc0aead).
+Final raw run: /tmp/mfm-followup-configured-test-02.log; final full JSON /tmp/mfm-followup-configured-final-export.json (SHA256d8be51ebd7419dbf1ae8abf998bf5830510a43a1d42d89c94c0da6966f9a328e).
+Owned patch: /tmp/mfm-followup-configured.patch (SHA2563c5c91e97d9e71fcff2fd08c9d578290405d86bfa63b87e2b76cb0bf0e46b4ad).
+Formatting logs: /tmp/mfm-followup-configured-format-02.log and /tmp/mfm-followup-configured-format-check.log.
+Final JSON records full Program/root/terminal Objects, independent descriptors/ref hashes, selected binding Objects, every physical frame and native original, actual scalar request/binding and Book request sinks, all negative causal traces with observed zero counts, optional-resource runs and exact cold output/zero IO.
+
+## Material uncertainties
+
+none for the named configured-loop construction and literal scripted-native guarantees. Target-wire restoration, remote native truth, whole-collection interruption intent, resource-free historical qualification, physical custody guarantees and production simplification remain unvalidated/outside this fixture's claim. Final exact-candidate CI has not yet run and is coordinator-owned.

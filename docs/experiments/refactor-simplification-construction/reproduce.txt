@@ -1,0 +1,55 @@
+This directory contains inert follow-up evidence, not a supported API.
+Main checkout began clean at amended docs commit 71226d68.
+Historical production baseline: a478fc341d993f3b9b747d72c53a6f027be41452.
+Historical control: 32c5283cb969ad30310ba98d6a378b5a84d40fdd.
+Owner-bound specimen: 6b0ecac9 (full hash in owner-bound-commit.txt).
+Corrected candidate: cb2a95ff66cff7a62d7cc0d2e8928c0a07591f93.
+Corrected tree: 87f4325f98e4faae2281e04d3a74c9ce316075a5.
+
+Choose an UNUSED owned worktree path. From main:
+  git worktree add --detach /tmp/mfm-construction-reproduction a478fc341d993f3b9b747d72c53a6f027be41452
+  cd /tmp/mfm-construction-reproduction
+  gzip -dc /home/willyrgf.linux/dev/mfm2/docs/experiments/refactor-simplification/candidate.patch.gz | git apply --index
+  gzip -dc /home/willyrgf.linux/dev/mfm2/docs/experiments/refactor-simplification-construction/owner-bound.patch.gz | git apply --index
+  gzip -dc /home/willyrgf.linux/dev/mfm2/docs/experiments/refactor-simplification-construction/configured-selection.patch.gz | git apply --index
+  git write-tree
+Expected tree exactly 87f4325f98e4faae2281e04d3a74c9ce316075a5.
+Alternatively followup-candidate.patch.gz replaces the TWO follow-up patches above.
+Do NOT apply archived followup-probes.patch.gz to the corrected candidate: that is
+historical defect evidence, separately reproduced with its documented serial flag.
+Staging makes all added files visible to Nix; do not leave a production API installed.
+
+Focused current candidate checks, all direct Rust tools in default Nix shell:
+  nix develop -c cargo test -p mfm-evm --test simplification_construction --test simplification_holdings --test simplification_extension --test simplification_configured -- --nocapture --test-threads=1
+Expected 18 tests pass. Configured export defaults to /tmp/mfm-configured-followup-export.json.
+  nix develop -c cargo test -p mfm-evm-live --test refactor_effect effect_constructor_ownership_rejects_substitution_before_attachment -- --nocapture
+Expected 1 passes, 2 ignored managed tests filtered; this is not physical verification.
+  nix develop -c bash crates/domains/evm/tests/simplification/compile_fail/run.sh /tmp/mfm-construction-compiler-evidence
+Expected gate0 and four consumer cargo exits101 for E0271, E0277, E0107+E0061, E0308.
+  nix develop -c cargo-fmt fmt --all -- --check
+
+Run ONE composed final gate after focused checks, rather than its component tasks:
+  python3 /home/willyrgf.linux/dev/mfm2/docs/experiments/refactor-simplification-construction/capture-ci.py --worktree /tmp/mfm-construction-reproduction --output /home/willyrgf.linux/.local/state/mfm-construction-reproduction-ci
+This executes nix run .#ci with a fresh owned NIXFIED_STATE_DIR, preserving only its
+specimen dump directory outside cleanup through a symlink. It changes no source,
+resource authority or observer. The output path must be unused. Existing managed
+Effect regressions and both ignored semantic specimen tests execute through CI.
+The capture wrapper verifies each raw dump against its logged length/SHA256.
+Require the full set of17 traces, not only a zero wrapper status.
+
+Read/holdings fixtures also export /tmp/mfm-*-frame.json; these contain safe full
+Objects/frames and no generated artifact bytes. Configured export preserves complete
+Program/root/output, actual arguments, physical frames, negative causes and cold result.
+  python3 /home/willyrgf.linux/dev/mfm2/docs/experiments/refactor-simplification-construction/extract-effect-evidence.py --dump-dir /home/willyrgf.linux/.local/state/mfm-construction-reproduction-ci/dumps --output-dir /tmp/mfm-construction-effect-evidence
+Full temporary Effect dumps include the generated first-party solc artifact and creation
+wire and MUST NOT be committed. The extractor preserves complete native receipt originals,
+selected public authority/node evidence and creation-wire digest/length; it is explicitly
+partial, not a lossless copy of full raw frames. Review full raw dumps before removal.
+Pinned artifact497bytes SHA256c7aed441e0afa86de84779ac168d27e4d8a29148b6834565d5930ef7c8ae855d.
+Fresh managed epochs/addresses/hashes vary; literal command terms and authority relationships
+are asserted. This is not a process restart or real network/COMMIT fault campaign.
+
+Archive evidence and independent review before removing ONLY the owned reproduction
+worktree/cache/raw dumps. Never use historical CI or ignored tests as corrected execution.
+From this evidence directory: sha256sum -c SHA256SUMS.
+Historical docs/experiments/refactor-simplification files remain unchanged.

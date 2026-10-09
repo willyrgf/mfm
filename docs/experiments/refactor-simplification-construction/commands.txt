@@ -1,0 +1,68 @@
+Commands and statuses for focused follow-up; all source execution in the owned specimen.
+Main starting checkout: 71226d68, clean; production baseline: a478fc34.
+Historical candidate 32c5283c reconstructed from archived candidate.patch.gz; staged tree
+comparison git diff --cached --exit-code 32c5283c returned 0. Applied historical
+followup-probes.patch.gz only for control demonstrations; these are not corrected tests.
+
+CONTROL (unchanged archived candidate plus archived diagnostic patch)
+nix develop -c cargo test -p mfm-evm --test simplification_construction --test simplification_holdings --test simplification_extension -- --nocapture
+exit 101; historical-control.log.gz. Coordinator omitted documented serial flag;
+shared diagnostic counters raced (observed 2/expected 1). No candidate change.
+nix develop -c cargo test -p mfm-evm --test simplification_construction --test simplification_holdings --test simplification_extension -- --nocapture --test-threads=1
+exit 0, 15 passed; historical-control-serial.log.gz. Both binder substitutions reproduced.
+
+OWNER-BOUND COMMIT 6b0ecac9
+nix develop -c cargo test -p mfm-evm --test simplification_construction --test simplification_holdings --test simplification_extension -- --nocapture --test-threads=1
+exit 0 both author iterations, 16 passed each; commit1-read-run1.log.gz / run2.
+nix develop -c cargo test -p mfm-evm-live --test refactor_effect effect_constructor_ownership_rejects_substitution_before_attachment -- --nocapture
+exit 0, 1 passed/2 filtered; effect-commit1-constructors.log.gz.
+nix develop -c bash crates/domains/evm/tests/simplification/compile_fail/run.sh /tmp/mfm-followup-evidence/commit1-negative-final
+exit 0; three individual cargo exits101; commit1-negative-final.log.gz,
+owner-bound-{adjacency,observation,free_binder}.log.gz. Initial author run1 gate0 retained.
+nix develop -c cargo-fmt fmt --all -- --check
+exit 0; commit1-fmt.log.gz. git diff --check exit0.
+
+FROZEN SECOND-CUTOVER PORTS BEFORE INDEPENDENT CHALLENGER
+nix develop -c cargo test -p mfm-evm --test simplification_construction --test simplification_holdings --test simplification_extension -- --test-threads=1 --nocapture
+exit 0, 17 passed; commit2-read-final.log.gz. Prior run1 exit0 retained.
+nix develop -c bash crates/domains/evm/tests/simplification/compile_fail/run.sh /tmp/mfm-followup-evidence/commit2-negative-final
+exit 0; four individual cargo exits101; commit2-negative-final.log.gz,
+selection-{adjacency,observation,free_binder,concrete_binding}.log.gz.
+Prior compiler run1 gate0 retained.
+nix develop -c cargo test -p mfm-evm-live --test refactor_effect effect_constructor_ownership_rejects_substitution_before_attachment -- --nocapture
+exit 0, 1 passed/2 filtered; effect-commit2-constructors.log.gz, then
+again exit0 after infallible append migration: effect-commit2-infallible-constructors.log.gz.
+Owned changed Rust files formatted with pinned cargo-fmt; git diff --check exit0.
+
+INDEPENDENT CONFIGURED CHALLENGE (single owned consumer file)
+MFM_CONFIGURED_EXPORT_PATH=/tmp/mfm-followup-configured-first-export.json nix develop -c cargo test -p mfm-evm --test simplification_configured -- --nocapture
+exit0, 1 passed; configured-run01.log.gz and configured-first-observed.json.gz.
+MFM_CONFIGURED_EXPORT_PATH=/tmp/mfm-followup-configured-final-export.json nix develop -c cargo test -p mfm-evm --test simplification_configured -- --nocapture
+exit0, 1 passed after review refinements; configured-run02.log.gz and configured-final-observed.json.gz.
+Pinned formatting/check exit0; configured-format-02.log.gz / configured-format-check.log.gz.
+Coordinator final nix develop -c cargo-fmt fmt --all -- --check exit0; final-fmt.log.gz.
+No-index git diff for a new file returned1/no whitespace diagnostics (expected difference status).
+See configured-worker-report.txt for complete author invocation details.
+
+EXACT FINAL CANDIDATE cb2a95ff66cff7a62d7cc0d2e8928c0a07591f93
+Committed clean; tree87f4325f98e4faae2281e04d3a74c9ce316075a5.
+python3 /home/willyrgf.linux/dev/mfm2/docs/experiments/refactor-simplification-construction/capture-ci.py --worktree /tmp/mfm-simplification-followup-71226d68 --output /home/willyrgf.linux/.local/state/mfm-construction-final-ci-cb2a95ff
+Executes nix run .#ci with only NIXFIED_STATE_DIR override for owned trace retention.
+Final composed CI exit0: 9 tasks passed, 0 failed, 962.29 seconds.
+Run run-c4e26ce8f46b6cb1ff1df9f5ac22c40c; ci.log.gz / ci-run-summary.json.
+Capture exit0; all17 raw trace lengths/digests verified, ci-capture.log.gz.
+Managed effect-e2e includes maintained regression (92.99s), corrected scripted probe
+(8.38s), corrected PostgreSQL/Reth probe (30.57s); whole managed task282.42s.
+No separate broad component gates or physical rerun performed.
+python3 docs/experiments/refactor-simplification-construction/extract-effect-evidence.py --dump-dir /home/willyrgf.linux/.local/state/mfm-construction-final-ci-cb2a95ff/dumps --output-dir docs/experiments/refactor-simplification-construction
+exit0; scripted-observed.json / managed-observed.json are explicit public subsets.
+
+FINAL ARCHIVE / DISPOSITION
+Independent review saved verbatim;63 new archive file hashes verified,47 historical hashes unchanged.
+Temporary-index patch application reconstructed exact tree87f4325f98e4faae2281e04d3a74c9ce316075a5, exit0.
+Main evidence committed before disposal. Verified owned specimen HEAD cb2a95ff and clean status.
+git worktree remove --force /tmp/mfm-simplification-followup-71226d68
+exit0; removed only owned clean specimen and its ignored build artifacts.
+Removed only fresh owned /home/willyrgf.linux/.local/state/mfm-construction-final-ci-cb2a95ff after full raw review and public extraction.
+Final main verification: new documentation links/JSON/inert Python syntax, SHA256SUMS and git diff --check all pass.
+Production code/contracts unchanged; no additional Rust gate required for final docs/evidence.

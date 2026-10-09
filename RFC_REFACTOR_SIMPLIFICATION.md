@@ -632,20 +632,24 @@ revisions and the installed trusted code.
 
 Attachment is part of that factory ownership. The adapter implementation owns its constructor;
 installation cannot independently supply another function under the same State/adapter/resource
-claims. The bounded specimen accepted that substitution both within one Catalog and across two
-Catalogs. Rejecting duplicate registration addresses the first case; owner-bound construction also
-removes the independently selectable constructor in the second. This is a fresh ownership defect,
-separate from the cold semantic-revision trust limit.
+claims. The initial bounded specimen accepted that substitution both within one Catalog and across
+two Catalogs. Rejecting duplicate registration addresses the first case; owner-bound construction also
+removes the independently selectable constructor in the second. The focused follow-up executes this
+correction for Read and Effect, including cross-Catalog checks and intended consuming compiler
+failures. The historical fresh ownership defect is separate from the unchanged cold semantic-revision
+trust limit.
 
-For config-driven collections, Application obtains a ReadLeaf<CollectHoldings> from the exact
-installed leaf reference and builds the endomorphic sequence with an ordinary loop. It does not
-need a global match naming every concrete adapter type. This is checked construction-time selection;
-Runtime still invokes only already-associated callbacks.
+For config-driven collections, Application obtains a ReadLeaf<S> for its endomorphic collection
+State from the exact installed leaf reference and builds the sequence with an ordinary loop. It
+does not need a global match naming every concrete adapter type. This is checked construction-time
+selection; Runtime still invokes only already-associated callbacks.
 
 The initial specimen proved static owner-local extension with binding-typed Leaf<S, B> handles.
-It did not exercise this binding-erased selection and authoring boundary. The focused follow-up in
-[the experiment record](EXPERIMENT_REFACTOR_SIMPLIFICATION.md#8-focused-follow-up-validation)
-must execute heterogeneous configured selections through this single append path.
+The focused follow-up in [the experiment record](EXPERIMENT_REFACTOR_SIMPLIFICATION.md#8-focused-follow-up-validation)
+executes this binding-erased boundary with one ordinary loop over two native owners and two distinct
+scalar network identities. Its small endomorphic State retains existing per-collection outputs; it
+does not turn their independent points into a global snapshot. This validates the exercised
+current-wire ports, not the complete target construction/inspection contract.
 
 ### 5.2 One installed Catalog
 
@@ -2014,8 +2018,9 @@ through a disposable current-wire bridge, with independently reviewed typed-port
 native-extension and semantic-Effect evidence. Its results record owns exact candidates, verification
 status and remaining limits; this is not approval of the complete production cutover.
 Subsequent review found fresh constructor substitution and an untested heterogeneous configured
-authoring boundary. Section 8 of the experiment record owns their focused corrective validation;
-the amended owner-bound constructor/selection contract has not yet executed.
+authoring boundary. Section 8 of the experiment record owns their executed corrective validation,
+exact corrected candidate, independent review and verification. The original CI is historical control
+evidence only; it does not validate the follow-up candidate.
 
 | Stage | Architectural question |
 | --- | --- |
@@ -2187,11 +2192,11 @@ existing consumers or focused extension fixtures; the illustrative route is not 
 | Uncertainty | Assumption | Why uncertain | Consequence if wrong | Validation / resolution |
 | --- | --- | --- | --- | --- |
 | Borrowed initial input and value ownership | The consuming builder can qualify input by reference, retain private initial/terminal codec ownership and preserve unchanged Runtime start, including zero-State Programs. | The replacement API is schematic and has not yet consumed every current authoring path. | Input custody could move into Program, shadow codecs could pass, or an extra start API/Identity State could become necessary. | Cut over existing Portfolio/lifecycle construction; reject changed input and initial/terminal shadow owners, exercise zero-State and independent value-codec contributions, and retain no duplicate root payload. |
-| Fresh exact implementation ownership | Adapter-owned construction and private factory/State/resource claims reject fresh substitution while persisted identity remains semantic. | The initial specimen accepted independent binder replacement under identical S/A/R claims; corrected construction and full checkpoints remain unimplemented. | A selected leaf could invoke an unselected constructor, matching refs could select different Rust owners, or a foreign checkpoint could pass nominal typing. | Reject duplicate entries; remove independent binder arguments; test Read/Effect cross-Catalog claims, then retain full shadow-owner/checkpoint acceptance and cold revision trust. |
-| Owner-bound resource construction | Each native adapter implementation can name its owner-local Resources table and constructor. | The fixtures fit this model; all production attachment paths have not been inventoried. | Constructor placement could require adjustment or introduce an unnecessary wrapper. | Inventory actual Read/Effect constructors and borrowed/thread-affine custody before the focused follow-up; preserve explicit composite owner tables and strengthen only actual execution bounds. |
-| Configuration-driven construction | Typed leaf selection and canonical binding Objects support one endomorphic loop across native owners. | The initial specimen used Leaf<S, B>, concrete binding arguments and a changing-type holdings State. | Application could require protocol branches or another authoring layer as support grows. | Execute the focused heterogeneous loop with existing owners, multiple network bindings, late wrong-owner binding and wrong State/mode/ref rejection before treating this boundary as supported. |
+| Fresh exact implementation ownership | Adapter-owned construction and private factory/State/resource claims reject fresh substitution while persisted identity remains semantic. | The initial specimen accepted independent binder replacement under identical S/A/R claims. The follow-up corrects and exercises Read/Effect construction through the current-wire bridge; full checkpoints remain unimplemented. | A selected leaf could invoke an unselected constructor, matching refs could select different Rust owners, or a foreign checkpoint could pass nominal typing. | Preserve the executed duplicate rejection, owner-bound bind and Read/Effect cross-Catalog checks during cutover; retain full shadow-owner/checkpoint acceptance and cold revision trust. |
+| Owner-bound resource construction | Each native adapter implementation can name its owner-local Resources table and constructor. | The follow-up inventories composite production EvmResources and thread-affine signer custody, and executes non-Send/non-Sync Read/Effect tables. Production attachment itself has not been cut over. | Constructor placement could require adjustment or introduce an unnecessary wrapper. | Preserve the inventoried composite owner tables and tested borrowed/thread-affine boundary in the production cutover; strengthen only actual execution bounds. |
+| Configuration-driven construction | Typed leaf selection and canonical binding Objects support one endomorphic loop across native owners. | The focused follow-up executes two owners, distinct network bindings and whole-document rejection through the current-wire bridge; broader product semantics remain untested. | New owners with different meaning could require distinct ports or admission rather than the demonstrated shared contract. | Preserve the executed ordinary loop and negative oracles in the target cutover; review units, identity, evidence and rejection semantics for each integration. |
 | Preparation totality | Checked phase inputs make valid request/command preparation possible; remaining failures use the existing causal InvocationDiagnostic. | Current consuming constructors and new direct State ports must be audited together. | Expected business refusal may be forced into an Internal failure or motivate an unnecessary command-free Runtime transition. | Review each retained constructor/admission invariant, place expected refusal at its owning admission or interpretation boundary, and test preparation failure with no command append. |
-| Audit identity projection | Direct projections receive admitted request/command refs, original Object and its decoded Receipt, selected intrinsic leaf ref, and EffectId for Effects; retained evidence replaces old native implementation identity explicitly. | Corrected ports and evidence-value cutover remain schematic. | Original retention or selected code provenance could be lost, reconstructed or mislabeled. | Preserve the actual lifecycle output's independently expected original bytes/ref and new leaf-ref meaning; test same-Object pairing and hot/cold projection without another original encoding or IO. |
+| Audit identity projection | Direct projections receive admitted request/command refs, original Object and its decoded Receipt, selected intrinsic leaf ref, and EffectId for Effects; retained evidence replaces old native implementation identity explicitly. | The bounded ports preserve originals/provenance and normalization; the production target evidence-value cutover remains unimplemented. | Original retention or selected code provenance could be lost, reconstructed or mislabeled. | Preserve the actual lifecycle output's independently expected original bytes/ref and new leaf-ref meaning; test same-Object pairing and hot/cold projection without another original encoding or IO. |
 | Validation specimen scope | A disposable direct-port/association slice can challenge real consumers without recreating Runtime or implementing most of the cutover. | Current Program association and wire are coupled to superseded machinery. | A shim could hide missing target identity guarantees, or exploratory work could become a competing implementation. | Declare the seam and claim limits first; independently review changes, retain UNVALIDATED target-wire claims, and discard the specimen after extracting evidence. |
 | Native custody identity lineage | One semantic EffectId can supply private reservation/wire authority while retaining exact native-command correspondence and ambiguity. | Current public reservation/preparation stages have distinct EffectIds; removing them changes orchestration identity origin. | Reused helpers could load the wrong authority, prepare another winner or misstate acknowledgement. | Compare actual old/new ID/ref/key lineage before reusing physical controls; exercise concrete helper correspondence and select focused managed evidence if the authority arrangement changes. |
 | Ephemeral Observation identity | Plain Rust Observation and exact factory type equality suffice when existing semantic IDs/revisions or checked instance facts identify every behavior-changing specialization. | Observation schema currently distinguishes some generic/const variants automatically; actual variants must be inventoried before deletion. | A cold sole replacement could change projection behavior under unchanged committed identity. | Consume a non-Serde Observation; reject fresh colliding variants and cold mismatched specialization revisions; review remaining stored ABI plus hidden parameters without adding an ObservationId trait. |
