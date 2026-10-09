@@ -775,3 +775,76 @@ literal outputs/refs/cause chains from independent observations. Archive sanitiz
 removing the owned worktree. Report speculative production replacement/deletion accounting
 separately from fixture LOC; no net production simplification follows from another additive
 specimen. A passing follow-up closes these named construction questions, not the whole RFC.
+
+
+### 8.1 Follow-up baseline, inventory and predictions before implementation
+
+The checkout was clean at the amended documentation commit `71226d68`, with no later commits or
+user edits. The owned worktree `/tmp/mfm-simplification-followup-71226d68` was created at `a478fc34`;
+applying the original archived patch reproduced the exact tree of historical candidate `32c5283c`.
+Its passing CI remains historical evidence only. The archived F5 diagnostic patch was then applied
+without modifying the historical archive. The first parallel control run exited 101: its two added
+tests share counters and one observed 2 instead of 1. The unchanged control rerun with
+`--test-threads=1` passed all 15 tests, including both constructor-substitution demonstrations.
+Both command outputs are retained for the follow-up archive. This fixture race does not close F5.
+
+Requested specialist assignments were accepted: constructor/selection author and independent
+configured-loop challenger `gpt-6.1-sol/high`, Effect construction/regression specialist
+`gpt-6.1-sol/xhigh`, and independent read-only reviewer `gpt-6-astra/xhigh`. No substitution was
+reported. The coordinator's requested `gpt-6-astra/xhigh` assignment remains not independently
+introspectable. The author owns the bridge and existing domain fixtures/compiler probes; the Effect
+specialist owns only live Effect fixtures; the challenger owns the new configured-loop consuming
+test after the coordinator records the frozen ports. The coordinator owns integration and records.
+
+**Attachment inventory.** Production `crates/live/evm/src/resources.rs` has one composite
+`EvmResources<Sources>` table of checked read routes/providers and transaction resources. Balance
+binding fixes the selected family; anchored contract binding fixes its route/ref. Effect binding
+selects the exact checked transaction resource, whose signer purpose/address and authority epoch
+were qualified at admission. `Sources` is only the old source-inventory phantom; dropping it belongs
+to the future production cutover, not this specimen. A composite table can remain one owner-local
+Resources type without splitting authority or adding universal resource access. Test environments
+also combine Read/Effect tables. The specimen's existing native tables can own static bind directly.
+
+The private Keystore remains non-Send/non-Sync inside its dedicated owner thread. Existing signer
+handles, provider handles and authority handles have their actual execution bounds. Construction
+borrows a table, then captures only those authorized handles; the table itself needs no blanket
+Send/Sync bounds. Read and Effect probes will use a real Rc<Cell<usize>> field read by bind, with
+only safe handles retained by the bound adapter. Effect construction may use a public opaque artifact
+Object solely to test association; actual execution continues to use the pinned 497-byte artifact.
+
+**Seam and deletion plan.** Continue using the same direct current-v9 Program/NativeAbi bridge and
+real Runtime, Journal and Store. Commit 1 gives both native traits associated Resources and one
+static bind, deletes independent binder arguments/resource generics, and rejects every duplicate
+intrinsic registration without replacing its first entry. Commit 2 replaces binding-typed leaves
+and concrete-binding appends with State-typed ReadLeaf/EffectLeaf, exact-reference selection and one
+canonical Object append per mode. Keep nominal Current adjacency and private owner claims. No
+Runtime, authoring language, registry, BinderId or pointer-comparison identity is added. Freeze the
+ports before the independent challenger implements its ordinary loop.
+
+| Discriminator | Predicted literal observation | Consequence if wrong |
+| --- | --- | --- |
+| Fresh constructor ownership | Duplicate/conflicting installation rejects with attachment/IO counters zero and leaves the first entry installed; the same adapter across Catalogs uses its sole bind; a foreign adapter/resource claim rejects. Test both modes. | F5 remains open; duplicate rejection alone is insufficient. |
+| Deleted arbitrary constructor API | A valid independent consumer supplying the former third resource generic/free binder fails for the removed generic/argument, while retained adjacency/Observation negatives still fail for their intended type mismatch. | The old ownership hole or a weakened typed port remains. |
+| Resource ownership | Real non-Send/non-Sync table fields are consulted only during static bind; bound adapters keep existing safe execution handles. | The correction imposes an unnecessary construction bound or changes custody. |
+| Configured ordinary loop | Scalar alpha, Book, scalar beta execute in that exact order from only progress, Catalog and `(ContentRef,Object)` selections; both scalar occurrences share one factory/ref. | F6 requires an unacknowledged protocol dispatcher or parallel append API. |
+| True network reuse | Scalar chain 31337/genesis bytes 1/anchor 7/hash bytes 7, Book ledger 19/point 117, scalar chain 8453/genesis bytes 2/anchor 19/hash bytes 9. Scalar units 1234500 at denomination 6 and 42000000000000000000 at denomination 18; Book requested order 42/0 at denomination 0 while original order is 0/42. | Endpoint renaming or forced normalization does not establish this boundary. |
+| Whole-document qualification | A Book binding in the later scalar occurrence rejects before either constructor or provider is entered. Unknown ref, wrong State/mode, malformed binding and missing selected resources retain their causes; unselected tables are optional. | Construction can attach before qualifying the complete selection or silently substitute ownership. |
+| Retained guarantees | Normalized request/receipt are literal 7 with one original encoding; native fault 731 and failed-Store cause 932 keep their separate custody. Cold inspection adds zero native IO; the specialization/revision trust limit remains explicit. | Construction correction regressed canonical or causal authority. |
+| Effect regression | Same semantic EffectId/native-command-ref/authority-key relationships and reserve/retain/submit order as the historical semantic specimen; command acknowledgement precedes native IO and settlement acknowledgement precedes interpretation. | Reuse of physical controls is insufficient; changed guarantees require a selected physical experiment. |
+
+The challenger's [predictions](docs/experiments/refactor-simplification-construction/configured-predictions.txt)
+and independently assembled [literal Objects](docs/experiments/refactor-simplification-construction/configured-literals.json)
+were recorded before corrected-port consumption. Independent provider argument sinks include the
+selected scalar anchor/binding; underlying Store frames establish originals separately from output
+projection. Collection points remain independent; no global snapshot or remote network-truth claim
+is made. Existing managed Effect regressions will run in one final CI on the corrected candidate.
+Current analysis requires no authority mapping, signer lifetime or physical ordering change.
+
+**Material uncertainties at prediction time.** Owner-bound construction and the configured selection
+path are unexecuted: a failed compiler/owner/late-binding oracle leaves the corresponding claim open.
+Validate with the named focused probes and independent review before final CI. Composite tables and
+thread-affine fields must compile and bind without blanket execution bounds; the actual Rc/Cell
+probes decide that assumption. The current-wire seam cannot validate production descriptor/cold
+acceptance, live provider truth, collection interruption intent or net production savings; those
+remain the separate implementation gates in section 7. No unresolved ownership/design ambiguity
+requiring a dedicated architect was identified by the author, Effect specialist or reviewer.
