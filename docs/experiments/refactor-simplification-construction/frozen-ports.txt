@@ -1,0 +1,30 @@
+Construction ports frozen before independent configured-loop implementation.
+Base: owner-bound specimen commit 6b0ecac9; uncommitted second-cutover source hashes below.
+
+NativeRead/NativeEffect declare Resources: Any and one static bind. Registration
+register_read::<S,A>() / register_effect::<S,A>() accepts no independent binder.
+ReadLeaf<S>/EffectLeaf<S> retain private owner claims and expose exact reference().
+Catalog.select_read::<S>(&ContentRef) / select_effect::<S>(&ContentRef) return Result.
+Selection checks installed key, mode, actual State TypeId and nominal contracts.
+Builder<C>.read<S: ReadState<Input=C>>(self, &ReadLeaf<S>, &Object)
+returns Builder<S::Output> directly; effect has the analogous sole Object path.
+Binding/native resource qualification and rejection happen at finish before attachment.
+There is no binding-generic Leaf or concrete-binding append overload.
+
+Diagnostic operation/reasons: select_leaf/leaf_unavailable, select_leaf/mode_mismatch,
+select_leaf/conflicting_owner for a foreign State; associate/resource_owner_unavailable
+for a missing selected table. Correct-schema malformed and wrong-schema Objects retain
+qualify_binding causes. Resource-table existence is checked for EVERY occurrence in
+the first association loop; missing later resources also precede all attachments.
+
+ScalarEvents has attachments AtomicUsize incremented by the sole bind constructor,
+and bindings Mutex<Vec<ScalarBinding>> written at observation entry. Existing requests
+sink retains actual provider arguments. BookResource keeps independent bind/IO sinks.
+The current v9 leaf descriptor domain and contract order remain unchanged.
+Independent challenger owns only simplification_configured.rs. Shared files stay frozen;
+a necessary bug correction must be documented and re-frozen before consuming it.
+
+SHA-256 source files:
+4d450b18b623560b389ebb48e4124d535eb87b8877cb49e6acc050d35cab9687  crates/kernel/program/src/experiment_bridge.rs
+eb998271adb45cfa98008aa431296072e729dff996fa3e5592ad3f57bc417d40  crates/domains/evm/tests/simplification/holdings.rs
+e0d10234d1b8ec1ae975da93db6235fa59ac844e93796839df9298627731a7c1  crates/domains/evm/tests/simplification/extension.rs
