@@ -1,0 +1,309 @@
+{
+  "domain": "mfm.run.frame.v6",
+  "payload": {
+    "checkpoints": [],
+    "domain": "mfm.runtime-record.v1",
+    "effect_barrier": null,
+    "operation": {
+      "succeeded": {
+        "call": {
+          "read": {
+            "call": {
+              "input": {
+                "canonical": {
+                  "ledger": {
+                    "native": {
+                      "canonical": {
+                        "chain_id": 1337,
+                        "expected_genesis_hash": "0x0101010101010101010101010101010101010101010101010101010101010101"
+                      },
+                      "value_ref": {
+                        "content_digest": "content:sha256-v1:cc25069e6ae392e91c47cdf8d1105f364340130d03f8ad8270e32bfa66884d58",
+                        "schema_id": "schema:mfm.evm-chain-instance:1:sha256-jcs-v1:378351854b8dd0c43b4b12c6d8f57f26e2614805ead0285a91ebc6416e432c3a"
+                      }
+                    }
+                  },
+                  "policy": "scripted-evm-anchor@1",
+                  "route": "route-b",
+                  "sources": [
+                    {
+                      "id": "native",
+                      "target": {
+                        "ledger": {
+                          "native": {
+                            "canonical": {
+                              "chain_id": 1337,
+                              "expected_genesis_hash": "0x0101010101010101010101010101010101010101010101010101010101010101"
+                            },
+                            "value_ref": {
+                              "content_digest": "content:sha256-v1:cc25069e6ae392e91c47cdf8d1105f364340130d03f8ad8270e32bfa66884d58",
+                              "schema_id": "schema:mfm.evm-chain-instance:1:sha256-jcs-v1:378351854b8dd0c43b4b12c6d8f57f26e2614805ead0285a91ebc6416e432c3a"
+                            }
+                          }
+                        },
+                        "native": {
+                          "canonical": {
+                            "account": "0x0202020202020202020202020202020202020202",
+                            "token": null
+                          },
+                          "value_ref": {
+                            "content_digest": "content:sha256-v1:9bff982e14a91266cc47de6e4f65ccbcaac149517ec3e14f04a66a31a00ca17a",
+                            "schema_id": "schema:mfm.evm-balance-target:1:sha256-jcs-v1:61dbb1f55e278f4cdec1f3f8a86765cad1bca60f1308deaf88e26772e5046995"
+                          }
+                        }
+                      }
+                    }
+                  ]
+                },
+                "value_ref": {
+                  "content_digest": "content:sha256-v1:9dc5703f1cd341897c5eae09e4225901f57e04b122c84bc483f142b2f9d45046",
+                  "schema_id": "schema:mfm.derived.collection_request:1:sha256-jcs-v1:0fb134d0ead7684bfd2e87e7dc494bb360cd92aa18bf5ac71f0ea6d3fa817c30"
+                }
+              },
+              "position": {
+                "state": 0,
+                "visit": 0
+              }
+            },
+            "evidence": {
+              "canonical": {
+                "anchor": {
+                  "hash": "0x0707070707070707070707070707070707070707070707070707070707070707",
+                  "number": "7"
+                },
+                "chain": {
+                  "chain_id": 1337,
+                  "expected_genesis_hash": "0x0101010101010101010101010101010101010101010101010101010101010101"
+                },
+                "query": {
+                  "content_digest": "content:sha256-v1:9dc5703f1cd341897c5eae09e4225901f57e04b122c84bc483f142b2f9d45046",
+                  "schema_id": "schema:mfm.derived.collection_request:1:sha256-jcs-v1:0fb134d0ead7684bfd2e87e7dc494bb360cd92aa18bf5ac71f0ea6d3fa817c30"
+                },
+                "results": [
+                  {
+                    "decimals": 18,
+                    "target": {
+                      "account": "0x0202020202020202020202020202020202020202",
+                      "token": null
+                    },
+                    "units": "1000000000000000000"
+                  }
+                ]
+              },
+              "value_ref": {
+                "content_digest": "content:sha256-v1:d4df8909cc254e4377bbd2cf07e7a7b30230553b7af4b48cae9a9e4750e94b6f",
+                "schema_id": "schema:mfm.derived.scalar_receipt:1:sha256-jcs-v1:6d20ea0ce18ba401062c0d593c3df7a489525448598729d5b171af1a30776b41"
+              }
+            },
+            "intent": {
+              "canonical": {
+                "ledger": {
+                  "native": {
+                    "canonical": {
+                      "chain_id": 1337,
+                      "expected_genesis_hash": "0x0101010101010101010101010101010101010101010101010101010101010101"
+                    },
+                    "value_ref": {
+                      "content_digest": "content:sha256-v1:cc25069e6ae392e91c47cdf8d1105f364340130d03f8ad8270e32bfa66884d58",
+                      "schema_id": "schema:mfm.evm-chain-instance:1:sha256-jcs-v1:378351854b8dd0c43b4b12c6d8f57f26e2614805ead0285a91ebc6416e432c3a"
+                    }
+                  }
+                },
+                "policy": "scripted-evm-anchor@1",
+                "route": "route-b",
+                "sources": [
+                  {
+                    "id": "native",
+                    "target": {
+                      "ledger": {
+                        "native": {
+                          "canonical": {
+                            "chain_id": 1337,
+                            "expected_genesis_hash": "0x0101010101010101010101010101010101010101010101010101010101010101"
+                          },
+                          "value_ref": {
+                            "content_digest": "content:sha256-v1:cc25069e6ae392e91c47cdf8d1105f364340130d03f8ad8270e32bfa66884d58",
+                            "schema_id": "schema:mfm.evm-chain-instance:1:sha256-jcs-v1:378351854b8dd0c43b4b12c6d8f57f26e2614805ead0285a91ebc6416e432c3a"
+                          }
+                        }
+                      },
+                      "native": {
+                        "canonical": {
+                          "account": "0x0202020202020202020202020202020202020202",
+                          "token": null
+                        },
+                        "value_ref": {
+                          "content_digest": "content:sha256-v1:9bff982e14a91266cc47de6e4f65ccbcaac149517ec3e14f04a66a31a00ca17a",
+                          "schema_id": "schema:mfm.evm-balance-target:1:sha256-jcs-v1:61dbb1f55e278f4cdec1f3f8a86765cad1bca60f1308deaf88e26772e5046995"
+                        }
+                      }
+                    }
+                  }
+                ]
+              },
+              "value_ref": {
+                "content_digest": "content:sha256-v1:9dc5703f1cd341897c5eae09e4225901f57e04b122c84bc483f142b2f9d45046",
+                "schema_id": "schema:mfm.derived.collection_request:1:sha256-jcs-v1:0fb134d0ead7684bfd2e87e7dc494bb360cd92aa18bf5ac71f0ea6d3fa817c30"
+              }
+            }
+          }
+        },
+        "output": {
+          "canonical": {
+            "holdings": [
+              {
+                "denomination": 18,
+                "point": {
+                  "ledger": {
+                    "native": {
+                      "canonical": {
+                        "chain_id": 1337,
+                        "expected_genesis_hash": "0x0101010101010101010101010101010101010101010101010101010101010101"
+                      },
+                      "value_ref": {
+                        "content_digest": "content:sha256-v1:cc25069e6ae392e91c47cdf8d1105f364340130d03f8ad8270e32bfa66884d58",
+                        "schema_id": "schema:mfm.evm-chain-instance:1:sha256-jcs-v1:378351854b8dd0c43b4b12c6d8f57f26e2614805ead0285a91ebc6416e432c3a"
+                      }
+                    }
+                  },
+                  "native": {
+                    "canonical": {
+                      "hash": "0x0707070707070707070707070707070707070707070707070707070707070707",
+                      "number": "7"
+                    },
+                    "value_ref": {
+                      "content_digest": "content:sha256-v1:1e8e9f2e96982886c025a5ca756ea0fe79984b3b8969f832a34ec7c894bd4bf4",
+                      "schema_id": "schema:mfm.derived.evm_block_anchor:1:sha256-jcs-v1:0fda9612f548f6f26641882e32059a50148044abeb78c06ff9e493995cb3ff5e"
+                    }
+                  }
+                },
+                "raw_units": "1000000000000000000",
+                "source_id": "native",
+                "target": {
+                  "ledger": {
+                    "native": {
+                      "canonical": {
+                        "chain_id": 1337,
+                        "expected_genesis_hash": "0x0101010101010101010101010101010101010101010101010101010101010101"
+                      },
+                      "value_ref": {
+                        "content_digest": "content:sha256-v1:cc25069e6ae392e91c47cdf8d1105f364340130d03f8ad8270e32bfa66884d58",
+                        "schema_id": "schema:mfm.evm-chain-instance:1:sha256-jcs-v1:378351854b8dd0c43b4b12c6d8f57f26e2614805ead0285a91ebc6416e432c3a"
+                      }
+                    }
+                  },
+                  "native": {
+                    "canonical": {
+                      "account": "0x0202020202020202020202020202020202020202",
+                      "token": null
+                    },
+                    "value_ref": {
+                      "content_digest": "content:sha256-v1:9bff982e14a91266cc47de6e4f65ccbcaac149517ec3e14f04a66a31a00ca17a",
+                      "schema_id": "schema:mfm.evm-balance-target:1:sha256-jcs-v1:61dbb1f55e278f4cdec1f3f8a86765cad1bca60f1308deaf88e26772e5046995"
+                    }
+                  }
+                }
+              }
+            ],
+            "leaf_ref": {
+              "content_digest": "content:sha256-v1:f6c0bda5a1afab8577b5b5f4eb281de753ccbfda527399e9d27b4e3935aba8b3",
+              "schema_id": "schema:mfm-experiment-leaf:1:sha256-jcs-v1:0000000000000000000000000000000000000000000000000000000000000000"
+            },
+            "original": {
+              "canonical": {
+                "anchor": {
+                  "hash": "0x0707070707070707070707070707070707070707070707070707070707070707",
+                  "number": "7"
+                },
+                "chain": {
+                  "chain_id": 1337,
+                  "expected_genesis_hash": "0x0101010101010101010101010101010101010101010101010101010101010101"
+                },
+                "query": {
+                  "content_digest": "content:sha256-v1:9dc5703f1cd341897c5eae09e4225901f57e04b122c84bc483f142b2f9d45046",
+                  "schema_id": "schema:mfm.derived.collection_request:1:sha256-jcs-v1:0fb134d0ead7684bfd2e87e7dc494bb360cd92aa18bf5ac71f0ea6d3fa817c30"
+                },
+                "results": [
+                  {
+                    "decimals": 18,
+                    "target": {
+                      "account": "0x0202020202020202020202020202020202020202",
+                      "token": null
+                    },
+                    "units": "1000000000000000000"
+                  }
+                ]
+              },
+              "value_ref": {
+                "content_digest": "content:sha256-v1:d4df8909cc254e4377bbd2cf07e7a7b30230553b7af4b48cae9a9e4750e94b6f",
+                "schema_id": "schema:mfm.derived.scalar_receipt:1:sha256-jcs-v1:6d20ea0ce18ba401062c0d593c3df7a489525448598729d5b171af1a30776b41"
+              }
+            },
+            "request": {
+              "ledger": {
+                "native": {
+                  "canonical": {
+                    "chain_id": 1337,
+                    "expected_genesis_hash": "0x0101010101010101010101010101010101010101010101010101010101010101"
+                  },
+                  "value_ref": {
+                    "content_digest": "content:sha256-v1:cc25069e6ae392e91c47cdf8d1105f364340130d03f8ad8270e32bfa66884d58",
+                    "schema_id": "schema:mfm.evm-chain-instance:1:sha256-jcs-v1:378351854b8dd0c43b4b12c6d8f57f26e2614805ead0285a91ebc6416e432c3a"
+                  }
+                }
+              },
+              "policy": "scripted-evm-anchor@1",
+              "route": "route-b",
+              "sources": [
+                {
+                  "id": "native",
+                  "target": {
+                    "ledger": {
+                      "native": {
+                        "canonical": {
+                          "chain_id": 1337,
+                          "expected_genesis_hash": "0x0101010101010101010101010101010101010101010101010101010101010101"
+                        },
+                        "value_ref": {
+                          "content_digest": "content:sha256-v1:cc25069e6ae392e91c47cdf8d1105f364340130d03f8ad8270e32bfa66884d58",
+                          "schema_id": "schema:mfm.evm-chain-instance:1:sha256-jcs-v1:378351854b8dd0c43b4b12c6d8f57f26e2614805ead0285a91ebc6416e432c3a"
+                        }
+                      }
+                    },
+                    "native": {
+                      "canonical": {
+                        "account": "0x0202020202020202020202020202020202020202",
+                        "token": null
+                      },
+                      "value_ref": {
+                        "content_digest": "content:sha256-v1:9bff982e14a91266cc47de6e4f65ccbcaac149517ec3e14f04a66a31a00ca17a",
+                        "schema_id": "schema:mfm.evm-balance-target:1:sha256-jcs-v1:61dbb1f55e278f4cdec1f3f8a86765cad1bca60f1308deaf88e26772e5046995"
+                      }
+                    }
+                  }
+                }
+              ]
+            }
+          },
+          "value_ref": {
+            "content_digest": "content:sha256-v1:ff3927e370a9e42b9a11b1eeb24296f95b89252814dc6728cfedfc4ff8d6fba1",
+            "schema_id": "schema:mfm.derived.collection_output:1:sha256-jcs-v1:83f54a4c85003a882b8ebf1135388a884709c08b4457deb8aab6967772c45ff3"
+          }
+        }
+      }
+    },
+    "program_ref": {
+      "content_digest": "content:sha256-v1:b37f0bc07abf35f7050c4588020d76a15347d1d7c522d97a7c291ea0516b98f3",
+      "schema_id": "schema:mfm-program-document:9:sha256-jcs-v1:efc3e77ec55f6e3963c52bcdc8dfe856e70dddd17ea59cfa1cb5f8beaaf82b94"
+    },
+    "usage": [
+      {
+        "restarts": 0,
+        "retries": 0
+      }
+    ]
+  },
+  "previous_head_digest": "content:sha256-v1:b699822d9f9a322800748ec6e859391bcbab578004aed06abe5d7b56ede0a53d",
+  "run_id": "run:sha256-jcs-v1:b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5",
+  "run_sequence": 2
+}

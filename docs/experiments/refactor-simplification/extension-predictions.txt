@@ -1,0 +1,86 @@
+# Independent extension predictions (before implementation)
+
+Baseline inspected: a478fc341d993f3b9b747d72c53a6f027be41452; working checkout clean.
+Author assignment: requested gpt-6.1-sol, high (actual model to be recorded by coordinator).
+
+## Existing requirements trace
+
+Portfolio admission checks source order, bounded nonempty collections, exact ledger envelope,
+source identity uniqueness, source-aligned public execution descriptors and one route per
+collection. Snapshot retains confirmed quantities and descriptors. Enrichment retains caller-
+required sources or nonzero raw quantities while filtering descriptors alongside sources.
+Native identity and protocol qualification stay outside Portfolio. Existing quote labels have
+no price/FX contract and cannot establish fiat value. The existing independent native fixture
+supplies fixed point `fixed-test-point` on `other-ledger`, raw amount 42 for account `retained`,
+0 otherwise, and source denomination 0. These are scripted holdings, not live chain support.
+
+The implemented path is native Prepare -> shared Observe -> native Confirm -> shared
+Consolidate, retaining each source. A proposed complete-collection Read can repeat unfinished
+sources; no reviewed product requirement establishes whether source-level durable progress is
+required. Source-stage tests alone cannot establish that requirement.
+
+## Common semantic contract
+
+Eligible sharing is unsigned fungible quantity in native base units with explicit denomination,
+ledger, target and observation point. Asset/account identity uses owner-native data in existing
+BalanceTarget/LedgerIdentity/ObservationPoint envelopes. Mapping changes representation only;
+it may not transform debt, spendable-only authority, locked/rebasing shares or fiat valuation into
+this quantity. Each owner owns its supported trust, coherence and authenticated rejection.
+Original native receipt Object and factory-selected code reference survive exactly. Unsupported
+meaning rejects at checked admission or uses a distinct contract; no generic protocol branch.
+
+## Predetermined extension observations
+
+1. First owner instances `route-a` and `route-b` use one installed factory. Binding differences
+   remain declaration data; changing a route acquires no new generic association entry.
+2. Second owner uses distinct typed binding, receipt, fault and resource owner. Its successful
+   collection contains source `retained` raw `42`, denomination 0, exact other-ledger identity,
+   fixed-test-point point; source `empty` raw `0`. No USD/EUR or scalar lifecycle meaning is
+   asserted. Independently scripted arguments and stored native originals establish expected
+   facts, not matching hot/cold projections alone.
+3. A whole-account batch receipt (ledger name + fixed snapshot + account-keyed entries) differs
+   structurally from a scalar request-relative EVM receipt. The owner must select the exact
+   requested account and reject absent/duplicate or wrong-unit entries without inventing 0.
+4. Local request/binding route, ledger, target or supported-unit disagreement fails before native
+   resource IO; no authenticated operational outcome is fabricated. An authenticated external
+   wrong identity/ref or unsupported native outcome retains a distinct owner rejection/fault
+   with the actual causal fields.
+5. A source whose meaning is `liability` is rejected as unsupported holdings, not negated,
+   flattened or returned as successful raw quantity.
+6. Equal family IDs and equal remaining stored contracts with a behavior-changing Observation-
+   only specialization expose the lost schema discriminator. Fresh private-owner collision must
+   reject before attachment. Distinct committed semantic revision or checked binding meaning
+   disambiguates. Existing-wire descriptor evidence does not establish target cold replacement
+   identity; sole restart replacement under unchanged IDs remains revision trust.
+
+## Counterexamples
+
+Central protocol branch, copied support matrix, native meaning coerced into holdings, second
+factory for compatible binding-only reuse, lost originals/cause/point, or pre-IO request mismatch
+becoming authenticated failure disproves the named sharing/locality subclaim. Inadequate target
+identity seam leaves specialization claim Unvalidated rather than supported by unrelated IDs.
+
+## Material uncertainties
+
+- Assumption: collection is the required acknowledgement unit. Why uncertain: product requirements
+  do not specify within-collection progress. Consequence: a future finer durability requirement
+  changes the chosen Read. Validation: obtain independent consuming acceptance, then exercise
+  complete/unfinished collection interruption explicitly; do not infer from current RPC stages.
+- Assumption: actual target descriptor is accessible. Why uncertain: Program v9 association uses
+  existing NativeAbi. Consequence: old-wire collision tests may hide the removed discriminator.
+  Validation: inspect supplied seam and label exact mechanism; retain target cold claim Unvalidated.
+- Assumption: scripted owner can represent equivalent holdings. Why uncertain: it is not live
+  protocol support. Consequence: locality evidence cannot certify remote truth. Validation:
+  independently inspect units, identity, point and rejection premises and preserve narrow claim.
+
+## Independent reviewer refinements before implementation
+
+- Requested-source coverage and order must remain complete and point exact; a batch receipt
+  missing requested account is different from explicit zero, and duplicate account entries
+  reject before any map insertion overwrites evidence.
+- Point sameness establishes only scripted fixed-snapshot coherence for this owner; it does not
+  equate its trust with EVM authenticated canonical anchoring.
+- Exercise one observed remote mismatch/fault with retained nested cause facts after actual
+  instrumented owner invocation, distinct from the local mismatch's zero IO/no outcome append.
+- Specialization collision keeps genuinely equal remaining stored contracts and family IDs,
+  changes behavior by unit arithmetic, and records any still-present NativeAbi discriminator.

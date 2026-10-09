@@ -1,0 +1,67 @@
+{
+  "domain": "mfm.run.frame.v6",
+  "payload": {
+    "checkpoints": [],
+    "domain": "mfm.runtime-record.v1",
+    "effect_barrier": null,
+    "operation": {
+      "succeeded": {
+        "call": {
+          "read": {
+            "call": {
+              "input": {
+                "canonical": "9",
+                "value_ref": {
+                  "content_digest": "content:sha256-v1:986b79d4b69dffb1d19836f47b27073d95bf55201b3385aceb7e0687a21d8667",
+                  "schema_id": "schema:mfm.evm-uint256:1:sha256-jcs-v1:b819c324714c76f55b4af1d74ef264635dedfa60b05737f300495b188bca0ba3"
+                }
+              },
+              "position": {
+                "state": 0,
+                "visit": 0
+              }
+            },
+            "evidence": {
+              "canonical": {
+                "value": 7
+              },
+              "value_ref": {
+                "content_digest": "content:sha256-v1:9d709bba0358da8fdf5600bb3692fa32d0aa2a19a08152cf4307e0b4240e71ac",
+                "schema_id": "schema:mfm.derived.normal_receipt:1:sha256-jcs-v1:6debe9d8ae936ad5867105a9fcfe2eeb3d5c4c459abaa50c55456c02c6356b91"
+              }
+            },
+            "intent": {
+              "canonical": {
+                "value": 7
+              },
+              "value_ref": {
+                "content_digest": "content:sha256-v1:9d709bba0358da8fdf5600bb3692fa32d0aa2a19a08152cf4307e0b4240e71ac",
+                "schema_id": "schema:mfm.derived.normal_request:1:sha256-jcs-v1:88bad8bb0b7f02b9d6f3dddc32a6f3bda7ef3259f633c77045a950273460d5c4"
+              }
+            }
+          }
+        },
+        "output": {
+          "canonical": "7",
+          "value_ref": {
+            "content_digest": "content:sha256-v1:266aa5886067fbbc1a3a39fe432fc5bbf561abc90e4b8a322215ac17df6ce012",
+            "schema_id": "schema:mfm.evm-uint256:1:sha256-jcs-v1:b819c324714c76f55b4af1d74ef264635dedfa60b05737f300495b188bca0ba3"
+          }
+        }
+      }
+    },
+    "program_ref": {
+      "content_digest": "content:sha256-v1:73a80353bdd84251cd401a8b611157ab29691186b351b5fd3b70fa1b1170524c",
+      "schema_id": "schema:mfm-program-document:9:sha256-jcs-v1:efc3e77ec55f6e3963c52bcdc8dfe856e70dddd17ea59cfa1cb5f8beaaf82b94"
+    },
+    "usage": [
+      {
+        "restarts": 0,
+        "retries": 0
+      }
+    ]
+  },
+  "previous_head_digest": "content:sha256-v1:196a64d3015744b63380c71df9941f575ff947fc27c36b5b134915a232ed7a21",
+  "run_id": "run:sha256-jcs-v1:adadadadadadadadadadadadadadadadadadadadadadadadadadadadadadadad",
+  "run_sequence": 2
+}

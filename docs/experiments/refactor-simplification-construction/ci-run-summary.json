@@ -1,0 +1,261 @@
+{
+  "durationMs": 962288,
+  "nodes": [
+    {
+      "durationMs": 564,
+      "exitCode": 0,
+      "nodeId": "ci.fmt",
+      "stderrPath": "/home/willyrgf.linux/.local/state/mfm-construction-final-ci-cb2a95ff/state/registry/mfm/dev/0/runs/run-c4e26ce8f46b6cb1ff1df9f5ac22c40c/logs/task.1.stderr.log",
+      "stdoutPath": "/home/willyrgf.linux/.local/state/mfm-construction-final-ci-cb2a95ff/state/registry/mfm/dev/0/runs/run-c4e26ce8f46b6cb1ff1df9f5ac22c40c/logs/task.1.stdout.log",
+      "success": true,
+      "summaryPath": "/home/willyrgf.linux/.local/state/mfm-construction-final-ci-cb2a95ff/state/registry/mfm/dev/0/runs/run-c4e26ce8f46b6cb1ff1df9f5ac22c40c/summary.1.json",
+      "taskId": "fmt"
+    },
+    {
+      "durationMs": 29184,
+      "exitCode": 0,
+      "nodeId": "ci.sqlx-check",
+      "stderrPath": "/home/willyrgf.linux/.local/state/mfm-construction-final-ci-cb2a95ff/state/registry/mfm/dev/0/runs/run-c4e26ce8f46b6cb1ff1df9f5ac22c40c/logs/task.2.stderr.log",
+      "stdoutPath": "/home/willyrgf.linux/.local/state/mfm-construction-final-ci-cb2a95ff/state/registry/mfm/dev/0/runs/run-c4e26ce8f46b6cb1ff1df9f5ac22c40c/logs/task.2.stdout.log",
+      "success": true,
+      "summaryPath": "/home/willyrgf.linux/.local/state/mfm-construction-final-ci-cb2a95ff/state/registry/mfm/dev/0/runs/run-c4e26ce8f46b6cb1ff1df9f5ac22c40c/summary.2.json",
+      "taskId": "sqlx-check"
+    },
+    {
+      "durationMs": 36923,
+      "exitCode": 0,
+      "nodeId": "ci.clippy",
+      "stderrPath": "/home/willyrgf.linux/.local/state/mfm-construction-final-ci-cb2a95ff/state/registry/mfm/dev/0/runs/run-c4e26ce8f46b6cb1ff1df9f5ac22c40c/logs/task.3.stderr.log",
+      "stdoutPath": "/home/willyrgf.linux/.local/state/mfm-construction-final-ci-cb2a95ff/state/registry/mfm/dev/0/runs/run-c4e26ce8f46b6cb1ff1df9f5ac22c40c/logs/task.3.stdout.log",
+      "success": true,
+      "summaryPath": "/home/willyrgf.linux/.local/state/mfm-construction-final-ci-cb2a95ff/state/registry/mfm/dev/0/runs/run-c4e26ce8f46b6cb1ff1df9f5ac22c40c/summary.3.json",
+      "taskId": "clippy"
+    },
+    {
+      "durationMs": 8873,
+      "exitCode": 0,
+      "nodeId": "ci.cargo-check",
+      "stderrPath": "/home/willyrgf.linux/.local/state/mfm-construction-final-ci-cb2a95ff/state/registry/mfm/dev/0/runs/run-c4e26ce8f46b6cb1ff1df9f5ac22c40c/logs/task.4.stderr.log",
+      "stdoutPath": "/home/willyrgf.linux/.local/state/mfm-construction-final-ci-cb2a95ff/state/registry/mfm/dev/0/runs/run-c4e26ce8f46b6cb1ff1df9f5ac22c40c/logs/task.4.stdout.log",
+      "success": true,
+      "summaryPath": "/home/willyrgf.linux/.local/state/mfm-construction-final-ci-cb2a95ff/state/registry/mfm/dev/0/runs/run-c4e26ce8f46b6cb1ff1df9f5ac22c40c/summary.4.json",
+      "taskId": "cargo-check"
+    },
+    {
+      "durationMs": 398684,
+      "exitCode": 0,
+      "nodeId": "ci.cargo-test",
+      "stderrPath": "/home/willyrgf.linux/.local/state/mfm-construction-final-ci-cb2a95ff/state/registry/mfm/dev/0/runs/run-c4e26ce8f46b6cb1ff1df9f5ac22c40c/logs/task.5.stderr.log",
+      "stdoutPath": "/home/willyrgf.linux/.local/state/mfm-construction-final-ci-cb2a95ff/state/registry/mfm/dev/0/runs/run-c4e26ce8f46b6cb1ff1df9f5ac22c40c/logs/task.5.stdout.log",
+      "success": true,
+      "summaryPath": "/home/willyrgf.linux/.local/state/mfm-construction-final-ci-cb2a95ff/state/registry/mfm/dev/0/runs/run-c4e26ce8f46b6cb1ff1df9f5ac22c40c/summary.5.json",
+      "taskId": "cargo-test"
+    },
+    {
+      "durationMs": 26518,
+      "exitCode": 0,
+      "nodeId": "ci.doc-tests",
+      "stderrPath": "/home/willyrgf.linux/.local/state/mfm-construction-final-ci-cb2a95ff/state/registry/mfm/dev/0/runs/run-c4e26ce8f46b6cb1ff1df9f5ac22c40c/logs/task.6.stderr.log",
+      "stdoutPath": "/home/willyrgf.linux/.local/state/mfm-construction-final-ci-cb2a95ff/state/registry/mfm/dev/0/runs/run-c4e26ce8f46b6cb1ff1df9f5ac22c40c/logs/task.6.stdout.log",
+      "success": true,
+      "summaryPath": "/home/willyrgf.linux/.local/state/mfm-construction-final-ci-cb2a95ff/state/registry/mfm/dev/0/runs/run-c4e26ce8f46b6cb1ff1df9f5ac22c40c/summary.6.json",
+      "taskId": "doc-tests"
+    },
+    {
+      "durationMs": 22628,
+      "exitCode": 0,
+      "nodeId": "ci.postgres-test",
+      "stderrPath": "/home/willyrgf.linux/.local/state/mfm-construction-final-ci-cb2a95ff/state/registry/mfm/dev/0/runs/run-c4e26ce8f46b6cb1ff1df9f5ac22c40c/logs/task.7.stderr.log",
+      "stdoutPath": "/home/willyrgf.linux/.local/state/mfm-construction-final-ci-cb2a95ff/state/registry/mfm/dev/0/runs/run-c4e26ce8f46b6cb1ff1df9f5ac22c40c/logs/task.7.stdout.log",
+      "success": true,
+      "summaryPath": "/home/willyrgf.linux/.local/state/mfm-construction-final-ci-cb2a95ff/state/registry/mfm/dev/0/runs/run-c4e26ce8f46b6cb1ff1df9f5ac22c40c/summary.7.json",
+      "taskId": "postgres-test"
+    },
+    {
+      "durationMs": 154524,
+      "exitCode": 0,
+      "nodeId": "ci.client-e2e",
+      "stderrPath": "/home/willyrgf.linux/.local/state/mfm-construction-final-ci-cb2a95ff/state/registry/mfm/dev/0/runs/run-c4e26ce8f46b6cb1ff1df9f5ac22c40c/logs/task.8.stderr.log",
+      "stdoutPath": "/home/willyrgf.linux/.local/state/mfm-construction-final-ci-cb2a95ff/state/registry/mfm/dev/0/runs/run-c4e26ce8f46b6cb1ff1df9f5ac22c40c/logs/task.8.stdout.log",
+      "success": true,
+      "summaryPath": "/home/willyrgf.linux/.local/state/mfm-construction-final-ci-cb2a95ff/state/registry/mfm/dev/0/runs/run-c4e26ce8f46b6cb1ff1df9f5ac22c40c/summary.8.json",
+      "taskId": "client-e2e"
+    },
+    {
+      "durationMs": 282424,
+      "exitCode": 0,
+      "nodeId": "ci.effect-e2e",
+      "stderrPath": "/home/willyrgf.linux/.local/state/mfm-construction-final-ci-cb2a95ff/state/registry/mfm/dev/0/runs/run-c4e26ce8f46b6cb1ff1df9f5ac22c40c/logs/task.9.stderr.log",
+      "stdoutPath": "/home/willyrgf.linux/.local/state/mfm-construction-final-ci-cb2a95ff/state/registry/mfm/dev/0/runs/run-c4e26ce8f46b6cb1ff1df9f5ac22c40c/logs/task.9.stdout.log",
+      "success": true,
+      "summaryPath": "/home/willyrgf.linux/.local/state/mfm-construction-final-ci-cb2a95ff/state/registry/mfm/dev/0/runs/run-c4e26ce8f46b6cb1ff1df9f5ac22c40c/summary.9.json",
+      "taskId": "effect-e2e"
+    }
+  ],
+  "runId": "run-c4e26ce8f46b6cb1ff1df9f5ac22c40c",
+  "services": [
+    {
+      "processKey": "process-run-c4e26ce8f46b6cb1ff1df9f5ac22c40c-367567-367567",
+      "selectedEndpoint": {
+        "endpointId": "postgres-tcp",
+        "host": "127.0.0.1",
+        "port": 23080
+      },
+      "serviceId": "postgres",
+      "serviceInstanceId": "36:run-c4e26ce8f46b6cb1ff1df9f5ac22c40cpostgres"
+    },
+    {
+      "processKey": "process-run-c4e26ce8f46b6cb1ff1df9f5ac22c40c-367587-367587",
+      "selectedEndpoint": {
+        "endpointId": "reth-http",
+        "host": "127.0.0.1",
+        "port": 23081
+      },
+      "serviceId": "reth",
+      "serviceInstanceId": "36:run-c4e26ce8f46b6cb1ff1df9f5ac22c40creth"
+    },
+    {
+      "processKey": "process-run-c4e26ce8f46b6cb1ff1df9f5ac22c40c-367678-367678",
+      "selectedEndpoint": {
+        "endpointId": "reth-delayed-http",
+        "host": "127.0.0.1",
+        "port": 23083
+      },
+      "serviceId": "reth-delayed",
+      "serviceInstanceId": "36:run-c4e26ce8f46b6cb1ff1df9f5ac22c40creth-delayed"
+    }
+  ],
+  "success": true,
+  "tasks": [
+    {
+      "canceled": false,
+      "durationMs": 560,
+      "exitCode": 0,
+      "processKey": "process-run-c4e26ce8f46b6cb1ff1df9f5ac22c40c-task-pg-init-367548-367548",
+      "stderrPath": "/home/willyrgf.linux/.local/state/mfm-construction-final-ci-cb2a95ff/state/registry/mfm/dev/0/runs/run-c4e26ce8f46b6cb1ff1df9f5ac22c40c/logs/task.0.stderr.log",
+      "stdoutPath": "/home/willyrgf.linux/.local/state/mfm-construction-final-ci-cb2a95ff/state/registry/mfm/dev/0/runs/run-c4e26ce8f46b6cb1ff1df9f5ac22c40c/logs/task.0.stdout.log",
+      "stepPath": "pg-init",
+      "success": true,
+      "summaryPath": "/home/willyrgf.linux/.local/state/mfm-construction-final-ci-cb2a95ff/state/registry/mfm/dev/0/runs/run-c4e26ce8f46b6cb1ff1df9f5ac22c40c/summary.0.json",
+      "taskId": "pg-init",
+      "timedOut": false
+    },
+    {
+      "canceled": false,
+      "durationMs": 564,
+      "exitCode": 0,
+      "processKey": "process-run-c4e26ce8f46b6cb1ff1df9f5ac22c40c-task-ci.fmt-367766-367766",
+      "stderrPath": "/home/willyrgf.linux/.local/state/mfm-construction-final-ci-cb2a95ff/state/registry/mfm/dev/0/runs/run-c4e26ce8f46b6cb1ff1df9f5ac22c40c/logs/task.1.stderr.log",
+      "stdoutPath": "/home/willyrgf.linux/.local/state/mfm-construction-final-ci-cb2a95ff/state/registry/mfm/dev/0/runs/run-c4e26ce8f46b6cb1ff1df9f5ac22c40c/logs/task.1.stdout.log",
+      "stepPath": "ci.fmt",
+      "success": true,
+      "summaryPath": "/home/willyrgf.linux/.local/state/mfm-construction-final-ci-cb2a95ff/state/registry/mfm/dev/0/runs/run-c4e26ce8f46b6cb1ff1df9f5ac22c40c/summary.1.json",
+      "taskId": "fmt",
+      "timedOut": false
+    },
+    {
+      "canceled": false,
+      "durationMs": 29184,
+      "exitCode": 0,
+      "processKey": "process-run-c4e26ce8f46b6cb1ff1df9f5ac22c40c-task-ci.sqlx-check-367773-367773",
+      "stderrPath": "/home/willyrgf.linux/.local/state/mfm-construction-final-ci-cb2a95ff/state/registry/mfm/dev/0/runs/run-c4e26ce8f46b6cb1ff1df9f5ac22c40c/logs/task.2.stderr.log",
+      "stdoutPath": "/home/willyrgf.linux/.local/state/mfm-construction-final-ci-cb2a95ff/state/registry/mfm/dev/0/runs/run-c4e26ce8f46b6cb1ff1df9f5ac22c40c/logs/task.2.stdout.log",
+      "stepPath": "ci.sqlx-check",
+      "success": true,
+      "summaryPath": "/home/willyrgf.linux/.local/state/mfm-construction-final-ci-cb2a95ff/state/registry/mfm/dev/0/runs/run-c4e26ce8f46b6cb1ff1df9f5ac22c40c/summary.2.json",
+      "taskId": "sqlx-check",
+      "timedOut": false
+    },
+    {
+      "canceled": false,
+      "durationMs": 36923,
+      "exitCode": 0,
+      "processKey": "process-run-c4e26ce8f46b6cb1ff1df9f5ac22c40c-task-ci.clippy-370804-370804",
+      "stderrPath": "/home/willyrgf.linux/.local/state/mfm-construction-final-ci-cb2a95ff/state/registry/mfm/dev/0/runs/run-c4e26ce8f46b6cb1ff1df9f5ac22c40c/logs/task.3.stderr.log",
+      "stdoutPath": "/home/willyrgf.linux/.local/state/mfm-construction-final-ci-cb2a95ff/state/registry/mfm/dev/0/runs/run-c4e26ce8f46b6cb1ff1df9f5ac22c40c/logs/task.3.stdout.log",
+      "stepPath": "ci.clippy",
+      "success": true,
+      "summaryPath": "/home/willyrgf.linux/.local/state/mfm-construction-final-ci-cb2a95ff/state/registry/mfm/dev/0/runs/run-c4e26ce8f46b6cb1ff1df9f5ac22c40c/summary.3.json",
+      "taskId": "clippy",
+      "timedOut": false
+    },
+    {
+      "canceled": false,
+      "durationMs": 8873,
+      "exitCode": 0,
+      "processKey": "process-run-c4e26ce8f46b6cb1ff1df9f5ac22c40c-task-ci.cargo-check-373487-373487",
+      "stderrPath": "/home/willyrgf.linux/.local/state/mfm-construction-final-ci-cb2a95ff/state/registry/mfm/dev/0/runs/run-c4e26ce8f46b6cb1ff1df9f5ac22c40c/logs/task.4.stderr.log",
+      "stdoutPath": "/home/willyrgf.linux/.local/state/mfm-construction-final-ci-cb2a95ff/state/registry/mfm/dev/0/runs/run-c4e26ce8f46b6cb1ff1df9f5ac22c40c/logs/task.4.stdout.log",
+      "stepPath": "ci.cargo-check",
+      "success": true,
+      "summaryPath": "/home/willyrgf.linux/.local/state/mfm-construction-final-ci-cb2a95ff/state/registry/mfm/dev/0/runs/run-c4e26ce8f46b6cb1ff1df9f5ac22c40c/summary.4.json",
+      "taskId": "cargo-check",
+      "timedOut": false
+    },
+    {
+      "canceled": false,
+      "durationMs": 398684,
+      "exitCode": 0,
+      "processKey": "process-run-c4e26ce8f46b6cb1ff1df9f5ac22c40c-task-ci.cargo-test-374126-374126",
+      "stderrPath": "/home/willyrgf.linux/.local/state/mfm-construction-final-ci-cb2a95ff/state/registry/mfm/dev/0/runs/run-c4e26ce8f46b6cb1ff1df9f5ac22c40c/logs/task.5.stderr.log",
+      "stdoutPath": "/home/willyrgf.linux/.local/state/mfm-construction-final-ci-cb2a95ff/state/registry/mfm/dev/0/runs/run-c4e26ce8f46b6cb1ff1df9f5ac22c40c/logs/task.5.stdout.log",
+      "stepPath": "ci.cargo-test",
+      "success": true,
+      "summaryPath": "/home/willyrgf.linux/.local/state/mfm-construction-final-ci-cb2a95ff/state/registry/mfm/dev/0/runs/run-c4e26ce8f46b6cb1ff1df9f5ac22c40c/summary.5.json",
+      "taskId": "cargo-test",
+      "timedOut": false
+    },
+    {
+      "canceled": false,
+      "durationMs": 26518,
+      "exitCode": 0,
+      "processKey": "process-run-c4e26ce8f46b6cb1ff1df9f5ac22c40c-task-ci.doc-tests-384975-384975",
+      "stderrPath": "/home/willyrgf.linux/.local/state/mfm-construction-final-ci-cb2a95ff/state/registry/mfm/dev/0/runs/run-c4e26ce8f46b6cb1ff1df9f5ac22c40c/logs/task.6.stderr.log",
+      "stdoutPath": "/home/willyrgf.linux/.local/state/mfm-construction-final-ci-cb2a95ff/state/registry/mfm/dev/0/runs/run-c4e26ce8f46b6cb1ff1df9f5ac22c40c/logs/task.6.stdout.log",
+      "stepPath": "ci.doc-tests",
+      "success": true,
+      "summaryPath": "/home/willyrgf.linux/.local/state/mfm-construction-final-ci-cb2a95ff/state/registry/mfm/dev/0/runs/run-c4e26ce8f46b6cb1ff1df9f5ac22c40c/summary.6.json",
+      "taskId": "doc-tests",
+      "timedOut": false
+    },
+    {
+      "canceled": false,
+      "durationMs": 22628,
+      "exitCode": 0,
+      "processKey": "process-run-c4e26ce8f46b6cb1ff1df9f5ac22c40c-task-ci.postgres-test-386597-386597",
+      "stderrPath": "/home/willyrgf.linux/.local/state/mfm-construction-final-ci-cb2a95ff/state/registry/mfm/dev/0/runs/run-c4e26ce8f46b6cb1ff1df9f5ac22c40c/logs/task.7.stderr.log",
+      "stdoutPath": "/home/willyrgf.linux/.local/state/mfm-construction-final-ci-cb2a95ff/state/registry/mfm/dev/0/runs/run-c4e26ce8f46b6cb1ff1df9f5ac22c40c/logs/task.7.stdout.log",
+      "stepPath": "ci.postgres-test",
+      "success": true,
+      "summaryPath": "/home/willyrgf.linux/.local/state/mfm-construction-final-ci-cb2a95ff/state/registry/mfm/dev/0/runs/run-c4e26ce8f46b6cb1ff1df9f5ac22c40c/summary.7.json",
+      "taskId": "postgres-test",
+      "timedOut": false
+    },
+    {
+      "canceled": false,
+      "durationMs": 154524,
+      "exitCode": 0,
+      "processKey": "process-run-c4e26ce8f46b6cb1ff1df9f5ac22c40c-task-ci.client-e2e-387531-387531",
+      "stderrPath": "/home/willyrgf.linux/.local/state/mfm-construction-final-ci-cb2a95ff/state/registry/mfm/dev/0/runs/run-c4e26ce8f46b6cb1ff1df9f5ac22c40c/logs/task.8.stderr.log",
+      "stdoutPath": "/home/willyrgf.linux/.local/state/mfm-construction-final-ci-cb2a95ff/state/registry/mfm/dev/0/runs/run-c4e26ce8f46b6cb1ff1df9f5ac22c40c/logs/task.8.stdout.log",
+      "stepPath": "ci.client-e2e",
+      "success": true,
+      "summaryPath": "/home/willyrgf.linux/.local/state/mfm-construction-final-ci-cb2a95ff/state/registry/mfm/dev/0/runs/run-c4e26ce8f46b6cb1ff1df9f5ac22c40c/summary.8.json",
+      "taskId": "client-e2e",
+      "timedOut": false
+    },
+    {
+      "canceled": false,
+      "durationMs": 282424,
+      "exitCode": 0,
+      "processKey": "process-run-c4e26ce8f46b6cb1ff1df9f5ac22c40c-task-ci.effect-e2e-388719-388719",
+      "stderrPath": "/home/willyrgf.linux/.local/state/mfm-construction-final-ci-cb2a95ff/state/registry/mfm/dev/0/runs/run-c4e26ce8f46b6cb1ff1df9f5ac22c40c/logs/task.9.stderr.log",
+      "stdoutPath": "/home/willyrgf.linux/.local/state/mfm-construction-final-ci-cb2a95ff/state/registry/mfm/dev/0/runs/run-c4e26ce8f46b6cb1ff1df9f5ac22c40c/logs/task.9.stdout.log",
+      "stepPath": "ci.effect-e2e",
+      "success": true,
+      "summaryPath": "/home/willyrgf.linux/.local/state/mfm-construction-final-ci-cb2a95ff/state/registry/mfm/dev/0/runs/run-c4e26ce8f46b6cb1ff1df9f5ac22c40c/summary.9.json",
+      "taskId": "effect-e2e",
+      "timedOut": false
+    }
+  ]
+}

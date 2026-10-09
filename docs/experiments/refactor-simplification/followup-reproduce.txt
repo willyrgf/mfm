@@ -1,0 +1,32 @@
+Reproduce the review diagnostics, not the proposed corrected architecture.
+Production baseline: a478fc341d993f3b9b747d72c53a6f027be41452.
+Original candidate: 32c5283cb969ad30310ba98d6a378b5a84d40fdd.
+Diagnostic delta: followup-probes.patch.gz, 49 added consuming test lines.
+Decompressed delta SHA256: b3407061da64a739c4f458107ccf8329a0abfb2f7c4bd2823097cf03eb2825ac.
+
+From the repository, choose an unused owned temporary worktree path:
+  git worktree add --detach /tmp/mfm-followup-review a478fc341d993f3b9b747d72c53a6f027be41452
+  cd /tmp/mfm-followup-review
+  gzip -dc /home/willyrgf.linux/dev/mfm2/docs/experiments/refactor-simplification/candidate.patch.gz | git apply
+  git add crates/kernel/program/src/lib.rs crates/kernel/program/src/experiment_bridge.rs crates/domains/evm/tests/simplification crates/domains/evm/tests/simplification_construction.rs crates/domains/evm/tests/simplification_extension.rs crates/domains/evm/tests/simplification_holdings.rs crates/live/evm/src/lib.rs crates/live/evm/src/refactor_effect_custody.rs crates/live/evm/tests/refactor_effect.rs crates/live/evm/tests/support/refactor_effect_managed.rs nixfied.nix
+  gzip -dc /home/willyrgf.linux/dev/mfm2/docs/experiments/refactor-simplification/followup-probes.patch.gz | git apply
+  git add crates/domains/evm/tests/simplification_construction.rs
+  nix develop -c cargo test -p mfm-evm --test simplification_construction --test simplification_holdings --test simplification_extension -- --nocapture --test-threads=1
+
+Staging added files is necessary for Nix's Git source view, not a production commit.
+The serial test flag keeps the two diagnostic counter assertions independent.
+Expected: 9 construction + 5 extension + 1 holdings tests pass; two REVIEW lines report that
+binder_two is called although the selected leaf came from binder_one, with/without another Catalog.
+These successful diagnostic assertions demonstrate the uncorrected candidate's ownership defect.
+No managed services, solc artifact or broad CI are needed to reproduce these Read diagnostics.
+Preserve fresh output before removing only the owned worktree; do not substitute it for original CI.
+
+The archived run used the exact candidate Git object in an owned detached worktree and appended
+this same patch. Its final focused output is followup-read-probes.log.gz. An earlier combined
+diagnostic run failed because one review test did not reset shared counters; full raw output was
+not archived. The final patch fixes only that test bookkeeping; original implementation is unchanged.
+
+This amendment requires docs/link/command/checksum review and git diff --check only.
+EXPERIMENT_REFACTOR_SIMPLIFICATION.md section 8 defines the new executable corrective experiment.
+That future cross-crate construction change follows the verification guide's final exact-candidate
+CI requirement. Neither the original candidate's pass nor this diagnostic rerun validates it.

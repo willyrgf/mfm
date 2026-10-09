@@ -1,0 +1,120 @@
+# H4 bounded Effect/custody result
+
+Requested/actual worker assignment: gpt-6.1-sol, xhigh. No substitution.
+Baseline: a478fc341d993f3b9b747d72c53a6f027be41452.
+Final disposable source: 32c5283cb969ad30310ba98d6a378b5a84d40fdd.
+Final exact-candidate CI is coordinator-owned and was still running at this handoff.
+
+The bounded result supports one semantic Effect's scheduling and private native
+authority correspondence through the documented current-wire bridge. No production
+cutover or target Program wire has been approved.
+
+## Expected facts and actual lineage
+
+The old control independently executes the real current deployment expansion and
+extracts three EffectPrepared records from underlying Store rows. Reservation uses
+an Eip1559TransactionCommand ref and reservation EffectId; preparation uses a
+ReservedEvmTransaction ref and different public EffectId; designated execution uses
+PreparedTransaction<DeploymentRequest> and a third public EffectId. Physical
+reservation/load/retain remain keyed by the first ID and nonce-free native ref.
+
+The candidate acknowledges DeploymentRequest itself, or DeployedContract itself,
+as the semantic command. One semantic EffectId crosses all three existing native
+helpers. The physical command ref remains the exact admitted nonce-free native
+command ref. NonceDomain remains epoch + chain instance + sender, with unchanged
+first-winner and ambiguous-load contracts. A specimen native Receipt adds the
+native-command ref absent from current EvmTransactionSettlement v1. Offline
+projection rederives and compares it using the admitted semantic command and
+retained binding, without reopening physical authority after settlement.
+
+Predetermined terms: supported 497-byte pinned scalar initcode SHA-256
+c7aed441e0afa86de84779ac168d27e4d8a29148b6834565d5930ef7c8ae855d;
+zero transferred value; create gas 2000000; call gas 200000;
+priority fee 1000000000; maximum fee 10000000000;
+configure(uint256) selector 1eb25e0a and scalar 42;
+independent getter selector 3fa4f245 returns one 32-byte word ending 2a.
+Pinned solc --hashes independently confirms both selectors. The OS-generated
+ephemeral signer is never printed or persisted; its public sender is observed.
+
+## Discriminating schedules and oracles
+
+Scripted schedule commits command at underlying MemoryStore head2 and withholds
+its response. Direct underlying Store observation bypasses the wrapper. Adapter,
+authority, signer and provider counters remain zero. After response release, one
+qualified native winner is retained and submitted. Settlement commits at head3
+while response remains withheld: interpretation stays zero. Caller cancellation,
+new Runtime, current-wire Catalog.load, read and resume interpret the exact retained
+native original and selected declaration key with zero additional native IO.
+
+The second actual semantic command uses the same routine, with nonce1 and exact
+literal configuration calldata. The partial-outcome fragment acknowledges a
+successful deployment and then runs production checked max-U256 + 1. Its original
+decodes as AdditionOverflow, complete failed input decodes as DeployedContract,
+successful deployment hash and exact semantic command ref remain retained, and
+configuration preparation is never invoked. Three candidate reservations and one
+separate executed old-control reservation are distinguished explicitly.
+
+Managed PostgreSQL/Reth schedule independently observes committed command bytes via
+a different PostgresBackend. It releases command response, waits for actual node
+broadcast, cancels and reconstructs under the same retained keystore owner. The
+underlying authority snapshot holds the same semantic EffectId/native ref/domain
+and exact winning signed bytes. Reconstructed execution does not sign again.
+After independently observed settlement commit, cancellation and interpretation
+use zero native IO, including authority.load. The independent node's creation
+receipt address agrees with the decoded configuration winner target and node call
+receipt target. Independent anchored code/getter observation returns literal 42.
+Creation/configuration use nonces0,1 and two signing calls. Terminal replay changes
+neither bytes/head nor native counters.
+
+## Verification and evidence
+
+- `nix develop -c cargo check -p mfm-evm-live --test refactor_effect`: pass after
+  correcting ordinary prototype import/result-alias and task-borrow errors.
+- `nix develop -c cargo-clippy clippy -p mfm-evm-live --test refactor_effect -- -D warnings`:
+  pass after correcting lexical MutexGuard lifetime.
+- `nix run .#manifest-check`: exit0 for the disposable task additions.
+- Focused exact scripted test: pass, final reviewed pre-CI run exit0, 9.44s.
+- Initial selected `nix run .#effect-e2e`: exit0, total271.93s. Preserved current
+  lifecycle/scalar/native physical controls pass; candidate scripted exact8.08s and
+  managed exact22.93s pass. This precedes final trace hygiene/head-summary/literal
+  creation assertions, so exact final candidate validation belongs to final CI.
+- `extract-effect-evidence.py` reproduces the explicit public subset from temporary
+  dumps. It excludes compiler initcode and signed creation bytes, retaining their
+  refs, byte lengths and hashes plus exact-equality assertions. Exact configuration
+  signed bytes contain no compiler artifact and remain available.
+
+Full artifact-containing command/frame/consumer/wire dumps remain temporary. Native
+settlement originals themselves contain no initcode and are preserved completely
+in scripted-observed.json and managed-observed.json. Safe logs identify omitted
+full temporary dumps explicitly; the archive does not claim lossless copying.
+
+## Accounting and claim decisions
+
+H4 scheduling, acknowledged original custody and semantic/native physical ID mapping:
+Supported for this executed seam and schedule. Target wire, full deletion of current
+public stage machinery, wider physical acceptance and process-restart signing:
+Unvalidated. No H4 architectural counterexample was demonstrated.
+
+Owned changes add1497 disposable lines and delete0:84 helper,1module export,
+954direct-port/scripted test,454managed test,4task lines. Main production delta0.
+Two semantic State wrappers, two typed adapter pairings and one native Receipt feed
+one shared custody routine with one explicit native resource owner. Existing
+ReservedEvmTransaction/PreparedEvmTransaction are reused locally, so this probe does
+not demonstrate their production deletion. Runtime, Journal, Store, PostgreSQL SQL,
+dependency graph and generic scheduling algorithms acquire no protocol branch.
+
+## Material uncertainties
+
+- Assumption: current-wire association carries the tested callbacks faithfully.
+  It does; the target descriptor/Observation-free replacement wire is absent.
+  If target identity differs, these scheduling results may not establish cold
+  target association. Validate the complete target mechanism during its cutover.
+- Assumption: unchanged physical first-winner/ambiguity algorithms remain valid
+  under concurrency. This probe changes orchestration ID origin and exercises the
+  new mapping physically, but does not newly stress concurrent semantic callers or
+  real lost-COMMIT/network failures. Extend focused managed acceptance for those
+  cases; scripted withheld responses do not establish physical failure behavior.
+- Assumption: keeping the same keystore owner is sufficient for reconstruction.
+  It is the supported fixture contract; persistent/process-restart signing remains
+  unsupported. A future stronger custody guarantee requires its own owner design
+  and physical crash/restart evidence.

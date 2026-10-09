@@ -1,0 +1,55 @@
+**Accept the corrected specimen for the seven named construction discriminators.** I found no unresolved defect blocking those bounded claims. This accepts neither the complete RFC nor a production cutover.
+
+I reviewed the exact two-commit candidate read-only, without editing files or repeating broad test execution:
+
+- Constructor ownership: `6b0ecac93236cc2115ed77b1f34a332158b193df`.
+- Configured selection: `cb2a95ff66cff7a62d7cc0d2e8928c0a07591f93`.
+- Final tree: `87f4325f98e4faae2281e04d3a74c9ce316075a5`.
+
+The final disposable checkout was clean. The archived first, second and combined follow-up patches exactly match the corresponding Git diffs. Their uncompressed SHA256 values are respectively `04b6b93d10d34956d77d005f9cac837157adc950be59768f819046f4409fc441`, `5d68d05d7001cb0028723de9cd3ea1570771956f0b86db78274b8a845d1328ec`, and `fd3a4c8f298b5bd37d805464c0310157926a6ba0153c289e341e622f8f22e450`. The combined patch applies above historical `32c5283c`, not directly above the production baseline. The reproduction instructions preserve that distinction. All 47 historical evidence checksums still match.
+
+| Discriminator | Independent classification |
+|---|---|
+| Constructor ownership | **Supported.** NativeRead and NativeEffect own their Resources type and static bind. Registration exposes neither an independent resource generic nor a supplied constructor. Duplicate and conflicting registrations reject without replacing the first entry. Read and Effect probes exercise same-owner and foreign-owner cross-Catalog cases. |
+| Configured ordinary loop | **Supported.** The independent authoring function consumes typed progress, Catalog and exact-ref/Object pairs. Its ordinary loop requires no native adapter types, protocol match or boxed appender. It retains existing collection requests, outputs and correspondence checks. |
+| Distinct-network reuse | **Supported within scripted execution.** Different scalar chain/genesis identities and anchors share one installed factory. Actual provider bindings and requests agree with independently recorded expectations. This establishes no remote network truth. |
+| Whole-document qualification | **Supported for the specified checks.** Later wrong-owner/malformed Objects and missing selected tables reject before any attachment or IO. Unknown reference, wrong State and wrong mode reject distinctly. Both directions of optional unselected resources execute successfully. Owner-specific table/binding checks may still reject during static bind. |
+| Typed and canonical guarantees | **Supported.** Intended compiler failures, literal normalization, retained originals/provenance, complete reviewed cause chains and failed-Store distinctions remain exercised. |
+| Reassociation and identity | **Supported for exercised reconstruction and revision rejection. Counterexample to unconditional executable authenticity.** Exact retained Program/head/output reconstruct without native IO. The existing unchanged-semantic-ID specialization still permits fresh output 42→21; revised identity rejects. |
+| Effect construction/regression | **Supported for executed scripted and managed schedules.** Both semantic command pairings use exact selection and the single Object append path. Existing custody, acknowledgement, cancellation/resume and partial-outcome assertions remain intact and execute on the corrected candidate. |
+
+The historical F5 constructor-substitution result remains a **Counterexample for `32c5283c`**. Its first control invocation omitted the documented serial flag and exposed shared test counters; the unchanged serial rerun passed all 15 tests and reproduced both substitutions. That invocation error is recorded rather than treated as a new architectural defect or corrected-candidate failure.
+
+Both resource-table probes use actual `Rc<Cell<usize>>` fields consulted during bind. Only execution-safe handles enter the resulting adapters. Resources receive no blanket Send/Sync requirement, and the private Keystore remains in its owner thread. The final Effect custody helper and task graph are unchanged from the historical specimen.
+
+Selection checks the exact reference, mode, actual State TypeId and nominal contracts. The same-schema ShadowObserve rejection establishes that semantic/schema equality does not replace concrete State ownership. ReadLeaf/EffectLeaf retain private claims. The sole append path accepts a canonical `&Object` and is infallible; neither the concrete-binding overload nor its obsolete Result remains.
+
+I inspected the raw consuming compiler diagnostics. The four failures arise for their intended reasons: E0271 adjacency mismatch, E0277 Observation mismatch, E0107/E0061 removed resource generic and constructor argument, and E0308 concrete binding where `&Object` is required. The normalization fixture still retains literal request/receipt 7 with one encoding each and a non-Serde/non-Sync Observation. The new finish-only constructor tests do not exercise its shared encoding counters, so they do not recreate the historical parallel-test race.
+
+The independent configured fixture preserves scalar alpha, Book, scalar beta order. Alpha uses chain 31337/genesis bytes 1/anchor 7; beta uses chain 8453/genesis bytes 2/anchor 19. Their quantities and denominations remain `1234500`/6 and `42000000000000000000`/18. Book ledger 19 retains requested output order 42/0 at point 117 while preserving native original order 0/42.
+
+I independently recomputed 485 nested configured Object occurrences, both intrinsic descriptors/references, the Program commitment, all four complete Store frame envelopes and predecessors, terminal head, and the 122341-byte total. Provider requests, selected scalar bindings, retained native originals and progress prefixes agree with the literal expectations recorded before corrected-port consumption. The final focused and CI exports are byte-identical, SHA256 `d8be51ebd7419dbf1ae8abf998bf5830510a43a1d42d89c94c0da6966f9a328e`.
+
+All seven configured rejection traces retain zero observed attachments and IO. The late wrong-owner rejection preserves the exact expected scalar and actual Book schema identities. The malformed correct-schema Object preserves `schema_shape_mismatch`; it fails admission before a parser location exists. Existing native fault 731 and failed-Store cause 932 preserve their distinct custody: the latter does not claim successful durable audit through the failed Store. I also checked 91 nested Object occurrences in the fresh fault evidence.
+
+One reviewer check initially assumed visit index zero for every State. The retained contract uses visits 0/1/2. I corrected that assumption and reran the independent checks successfully; no candidate change or defect was involved.
+
+The exact candidate’s single final composed CI passed: exit 0, nine successful tasks, zero failures, 962.29 seconds, run `run-c4e26ce8f46b6cb1ff1df9f5ac22c40c`. I checked all task summaries and the complete log. The archived compressed log expands exactly to the actual log, SHA256 `f67e1bedc4e432f155b18f310c1ab40e9e933a47b0be196cd6141f76e220c8de`. Default scheduling exercised all 18 construction/configured/extension/holdings tests and the nonignored Effect constructor test. The managed stage also actually executed the maintained regression and both corrected ignored Effect probes.
+
+All 17 raw Effect traces match their logged lengths and SHA256 values. I independently checked 96 nested Object occurrences and the actual relationships among prepared commands, settlements, outputs, native originals, semantic command references, EffectIds, physical authority reservations, transaction hashes, node receipts and independent scalar observation. These checks did not rely on exported `asserted_equalities` flags. The partial-overflow evidence retains the successful deployment and typed refusal while performing no configuration preparation.
+
+An independent RLP decoder confirmed the signed transaction fields: chain 1337; creation/configuration nonces 0/1; expected fee, gas, destination, value and access-list fields; the pinned 497-byte creation data; and configuration calldata encoding 42. The independent node target and observed scalar value agree with the retained deployment/configuration results. This was not independent cryptographic signature or Keccak verification.
+
+The Effect evidence has an explicit limit: H4 command/settlement dumps retain payloads, while physical head/length/digest come from the underlying-Store observer. Those dumps cannot independently reconstruct and rehash complete H4 frame envelopes. The configured export does contain complete envelopes. The unchanged public extractor selects reviewed subtrees and replaces creation wire with length/digest; its output is a deliberately partial archive, not a lossless full trace.
+
+The final documentation now states these limits correctly, distinguishes pre-attachment table-presence checks from owner checks during bind, and attributes scalar instrumentation to the second specimen commit. No unresolved ownership ambiguity required architect escalation.
+
+The correction removes arbitrary binder selection, an independent resource generic, replacing registration, binding-typed leaves, concrete-binding append and obsolete append fallibility. Necessary temporary additions provide associated resources, private mode-specific selection and independent evidence. The follow-up adds 1683 net specimen lines; its bridge grows by 69. **Supported production-code LOC change is zero.** No production simplification or performance claim follows from these additive experiments.
+
+**Material uncertainties**
+
+- **Production transfer and target persistence:** The assumption is that this boundary can survive a complete production cutover. The specimen still uses the current v9/NativeAbi bridge, so target descriptors, schema restoration, checkpoints, policies and resource-free inspection remain unvalidated. A failure there could require a different cutover design; validate through the separate production gates in section 7.
+- **Semantic revision trust:** The assumption is that owners revise declared identity when semantics change. Executable bytes are not authenticated, and the retained specialization counterexample demonstrates the consequence. Any stronger authenticity claim requires a separately designed and tested contract.
+- **Broader physical and product behavior:** The executed schedules do not establish signer process restart, real COMMIT packet loss, disk crash, a new concurrent-winner campaign, remote network truth, global collection consistency, interruption policy or production performance. Extend the claims only with their corresponding selected experiments.
+
+After this report and the final archive checksums are saved, the owned disposable worktree and temporary raw Effect dumps may be removed.

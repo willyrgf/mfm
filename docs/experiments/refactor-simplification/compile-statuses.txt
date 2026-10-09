@@ -1,0 +1,6 @@
+Accumulated statuses: first c819369f before import/module formatting; then final 32c5283c.
+Final invocation alone is in compile-fail.log.
+adjacency cargo exit=101
+observation cargo exit=101
+adjacency cargo exit=101
+observation cargo exit=101

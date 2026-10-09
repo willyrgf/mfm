@@ -1,0 +1,44 @@
+This directory is an inert architectural experiment record, not a supported MFM API.
+Current design/architecture contracts remain unchanged. No executable specimen is kept in Cargo.
+
+Baseline: a478fc341d993f3b9b747d72c53a6f027be41452
+Candidate: 32c5283cb969ad30310ba98d6a378b5a84d40fdd
+Decompressed patch SHA256: 5ee7baf167a141652f395871e33b93f81360e01b7cd74b23bd59f0a320749a79
+All direct Rust commands require the default Nix shell.
+
+From the repository, choose an unused owned temporary worktree path:
+  git worktree add --detach /tmp/mfm-experiment-reproduction a478fc341d993f3b9b747d72c53a6f027be41452
+  cd /tmp/mfm-experiment-reproduction
+  gzip -dc /home/willyrgf.linux/dev/mfm2/docs/experiments/refactor-simplification/candidate.patch.gz | git apply
+  git add crates/kernel/program/src/lib.rs crates/kernel/program/src/experiment_bridge.rs crates/domains/evm/tests/simplification crates/domains/evm/tests/simplification_construction.rs crates/domains/evm/tests/simplification_extension.rs crates/domains/evm/tests/simplification_holdings.rs crates/live/evm/src/lib.rs crates/live/evm/src/refactor_effect_custody.rs crates/live/evm/tests/refactor_effect.rs crates/live/evm/tests/support/refactor_effect_managed.rs nixfied.nix
+
+Staging added files is necessary for Nix's Git source view; no production commit or API installation is implied.
+
+Focused typed-port, original-custody and independent extension probes:
+  nix develop -c cargo test -p mfm-evm --test simplification_construction --test simplification_holdings --test simplification_extension -- --nocapture
+  nix develop -c bash crates/domains/evm/tests/simplification/compile_fail/run.sh /tmp/mfm-reproduction-compiler-evidence
+The compiler gate succeeds only when both consumers fail with the intended type-error categories.
+
+Focused physical/custody task (pinned PostgreSQL, Reth, solc; includes baseline controls):
+  nix run .#effect-e2e
+The patched task executes both ignored candidate Effect tests explicitly. Merely running default cargo test skips those physical fixtures.
+
+If reproducing the broad final verification, run the composed gate instead of separately repeating its component gates:
+  nix run .#ci
+This also runs effect-e2e including both candidate tests. Requires sufficient disk for target/verification.
+
+The managed task sets TMPDIR to its state directory, which is removed on exit. An ambient MFM_EXPERIMENT_EVIDENCE_DIR is not part of its declared environment. To preserve full temporary dumps, use the capture wrapper for a focused physical run on the same unchanged candidate:
+  python3 /home/willyrgf.linux/dev/mfm2/docs/experiments/refactor-simplification/capture-effect-evidence.py --worktree /tmp/mfm-experiment-reproduction --output /home/willyrgf.linux/.local/state/mfm-reproduction-effect-export
+The output path must be fresh. The wrapper creates mode 0700 ownership, runs nix run .#effect-e2e with a fresh NIXFIED_STATE_DIR, and links only the previously absent specimen dump directory to the owned output directory. Pinned Nixfied cleanup does not follow this symlink. Candidate source, physical resources and observer logic are unchanged. Every copied JSON file is checked against its trace length/digest. For the original execution, this focused rerun followed successful CI because default cleanup had removed its full raw dumps; it was an archival correction, not another candidate change.
+
+Extract the selected public Effect facts:
+  python3 /home/willyrgf.linux/dev/mfm2/docs/experiments/refactor-simplification/extract-effect-evidence.py --dump-dir /home/willyrgf.linux/.local/state/mfm-reproduction-effect-export/dumps --output-dir /tmp/mfm-reproduction-effect-evidence
+The full temporary dumps contain compiler output and are intentionally not committed. The extractor preserves complete native receipt originals and selected public refs/authority/node evidence; creation wire is retained as digest/length rather than a compiled blob. It explicitly does not produce a lossless copy of the full frames. The test asserts exact full Object/byte equality before extraction.
+
+The maintained solc recipe compiles first-party MfmEffectFixture.sol with pinned solc 0.8.33, no optimizer, Cancun. Exact creation artifact 497 bytes, SHA256 c7aed441e0afa86de84779ac168d27e4d8a29148b6834565d5930ef7c8ae855d. Fresh signer/service setup changes public addresses, hashes and epochs; fixed command terms/relationships and independent 42/7/holdings oracles remain the acceptance criteria.
+
+Retain chosen evidence before removing only the owned reproduction worktree. Never treat historical control results, architecture review agreement or ignored tests as candidate execution.
+
+Archived .log.gz files preserve exact command output, including terminal whitespace; use gzip -dc to inspect.
+
+From this archive directory, sha256sum -c SHA256SUMS verifies the evidence files. The candidate patch digest above applies to its decompressed content.

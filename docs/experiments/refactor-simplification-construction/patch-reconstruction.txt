@@ -1,0 +1,7 @@
+Independent temporary-index reconstruction: original archived patch + owner-bound.patch.gz + configured-selection.patch.gz applied over a478fc34.
+All git commands exit0; exact corrected tree 87f4325f98e4faae2281e04d3a74c9ce316075a5.
+
+Decompressed patch SHA256:
+04b6b93d10d34956d77d005f9cac837157adc950be59768f819046f4409fc441  owner-bound.patch.gz
+5d68d05d7001cb0028723de9cd3ea1570771956f0b86db78274b8a845d1328ec  configured-selection.patch.gz
+fd3a4c8f298b5bd37d805464c0310157926a6ba0153c289e341e622f8f22e450  followup-candidate.patch.gz

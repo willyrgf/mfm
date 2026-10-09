@@ -1,0 +1,210 @@
+{
+  "domain": "mfm.run.frame.v6",
+  "payload": {
+    "checkpoints": [],
+    "domain": "mfm.runtime-record.v1",
+    "effect_barrier": null,
+    "operation": {
+      "recovered": {
+        "classification": "permanent",
+        "failure": {
+          "read": {
+            "call": {
+              "input": {
+                "canonical": {
+                  "ledger": {
+                    "native": {
+                      "canonical": {
+                        "book": 19
+                      },
+                      "value_ref": {
+                        "content_digest": "content:sha256-v1:34703e0c3065c2491adec843443ca8ee8e70647ab0ac07087a63471853e88e37",
+                        "schema_id": "schema:mfm.derived.book_ledger:1:sha256-jcs-v1:e38bae1fb4bbfbc3a1353f184da8a38598f5cef0193ab3cbc073de5c8900d1a6"
+                      }
+                    }
+                  },
+                  "policy": "scripted-fixed-snapshot@1",
+                  "route": "book-gateway",
+                  "sources": [
+                    {
+                      "id": "retained",
+                      "target": {
+                        "ledger": {
+                          "native": {
+                            "canonical": {
+                              "book": 19
+                            },
+                            "value_ref": {
+                              "content_digest": "content:sha256-v1:34703e0c3065c2491adec843443ca8ee8e70647ab0ac07087a63471853e88e37",
+                              "schema_id": "schema:mfm.derived.book_ledger:1:sha256-jcs-v1:e38bae1fb4bbfbc3a1353f184da8a38598f5cef0193ab3cbc073de5c8900d1a6"
+                            }
+                          }
+                        },
+                        "native": {
+                          "canonical": {
+                            "account": "retained",
+                            "asset": "BASE",
+                            "meaning": "holding"
+                          },
+                          "value_ref": {
+                            "content_digest": "content:sha256-v1:833cca23c3e01a6dac6215cf087cf74b1553e6827813fc86c996bd0ff1c95ca6",
+                            "schema_id": "schema:mfm.derived.book_account:1:sha256-jcs-v1:636611ac69b0230989f150c2fb3c5b9edc3ab94ec77353c0eeddb2e029dd4476"
+                          }
+                        }
+                      }
+                    },
+                    {
+                      "id": "empty",
+                      "target": {
+                        "ledger": {
+                          "native": {
+                            "canonical": {
+                              "book": 19
+                            },
+                            "value_ref": {
+                              "content_digest": "content:sha256-v1:34703e0c3065c2491adec843443ca8ee8e70647ab0ac07087a63471853e88e37",
+                              "schema_id": "schema:mfm.derived.book_ledger:1:sha256-jcs-v1:e38bae1fb4bbfbc3a1353f184da8a38598f5cef0193ab3cbc073de5c8900d1a6"
+                            }
+                          }
+                        },
+                        "native": {
+                          "canonical": {
+                            "account": "empty",
+                            "asset": "BASE",
+                            "meaning": "holding"
+                          },
+                          "value_ref": {
+                            "content_digest": "content:sha256-v1:8a812d735cfad642702cb76531b8514143a6f83d94330fae3df3366d088939ff",
+                            "schema_id": "schema:mfm.derived.book_account:1:sha256-jcs-v1:636611ac69b0230989f150c2fb3c5b9edc3ab94ec77353c0eeddb2e029dd4476"
+                          }
+                        }
+                      }
+                    }
+                  ]
+                },
+                "value_ref": {
+                  "content_digest": "content:sha256-v1:e8f702fd88d711263e3aef26e6251265aff0792b1a160290c9438fc31557f2d7",
+                  "schema_id": "schema:mfm.derived.collection_request:1:sha256-jcs-v1:0fb134d0ead7684bfd2e87e7dc494bb360cd92aa18bf5ac71f0ea6d3fa817c30"
+                }
+              },
+              "position": {
+                "state": 0,
+                "visit": 0
+              }
+            },
+            "intent": {
+              "canonical": {
+                "ledger": {
+                  "native": {
+                    "canonical": {
+                      "book": 19
+                    },
+                    "value_ref": {
+                      "content_digest": "content:sha256-v1:34703e0c3065c2491adec843443ca8ee8e70647ab0ac07087a63471853e88e37",
+                      "schema_id": "schema:mfm.derived.book_ledger:1:sha256-jcs-v1:e38bae1fb4bbfbc3a1353f184da8a38598f5cef0193ab3cbc073de5c8900d1a6"
+                    }
+                  }
+                },
+                "policy": "scripted-fixed-snapshot@1",
+                "route": "book-gateway",
+                "sources": [
+                  {
+                    "id": "retained",
+                    "target": {
+                      "ledger": {
+                        "native": {
+                          "canonical": {
+                            "book": 19
+                          },
+                          "value_ref": {
+                            "content_digest": "content:sha256-v1:34703e0c3065c2491adec843443ca8ee8e70647ab0ac07087a63471853e88e37",
+                            "schema_id": "schema:mfm.derived.book_ledger:1:sha256-jcs-v1:e38bae1fb4bbfbc3a1353f184da8a38598f5cef0193ab3cbc073de5c8900d1a6"
+                          }
+                        }
+                      },
+                      "native": {
+                        "canonical": {
+                          "account": "retained",
+                          "asset": "BASE",
+                          "meaning": "holding"
+                        },
+                        "value_ref": {
+                          "content_digest": "content:sha256-v1:833cca23c3e01a6dac6215cf087cf74b1553e6827813fc86c996bd0ff1c95ca6",
+                          "schema_id": "schema:mfm.derived.book_account:1:sha256-jcs-v1:636611ac69b0230989f150c2fb3c5b9edc3ab94ec77353c0eeddb2e029dd4476"
+                        }
+                      }
+                    }
+                  },
+                  {
+                    "id": "empty",
+                    "target": {
+                      "ledger": {
+                        "native": {
+                          "canonical": {
+                            "book": 19
+                          },
+                          "value_ref": {
+                            "content_digest": "content:sha256-v1:34703e0c3065c2491adec843443ca8ee8e70647ab0ac07087a63471853e88e37",
+                            "schema_id": "schema:mfm.derived.book_ledger:1:sha256-jcs-v1:e38bae1fb4bbfbc3a1353f184da8a38598f5cef0193ab3cbc073de5c8900d1a6"
+                          }
+                        }
+                      },
+                      "native": {
+                        "canonical": {
+                          "account": "empty",
+                          "asset": "BASE",
+                          "meaning": "holding"
+                        },
+                        "value_ref": {
+                          "content_digest": "content:sha256-v1:8a812d735cfad642702cb76531b8514143a6f83d94330fae3df3366d088939ff",
+                          "schema_id": "schema:mfm.derived.book_account:1:sha256-jcs-v1:636611ac69b0230989f150c2fb3c5b9edc3ab94ec77353c0eeddb2e029dd4476"
+                        }
+                      }
+                    }
+                  }
+                ]
+              },
+              "value_ref": {
+                "content_digest": "content:sha256-v1:e8f702fd88d711263e3aef26e6251265aff0792b1a160290c9438fc31557f2d7",
+                "schema_id": "schema:mfm.derived.collection_request:1:sha256-jcs-v1:0fb134d0ead7684bfd2e87e7dc494bb360cd92aa18bf5ac71f0ea6d3fa817c30"
+              }
+            },
+            "original": {
+              "canonical": {
+                "operation": "collect_book_snapshot",
+                "source": {
+                  "code": 2101,
+                  "message": "missing_requested_account",
+                  "stage": "remote_ingress"
+                }
+              },
+              "value_ref": {
+                "content_digest": "content:sha256-v1:34a9b7cf130f3636e29a6098b364d3b6f66ea6f0ac18d16e79f5ac5320291a39",
+                "schema_id": "schema:mfm.derived.book_fault:1:sha256-jcs-v1:c284f46f1327397828a5c4822022480503bd3b3083a0a21e77792ee68b2ed976"
+              }
+            }
+          }
+        },
+        "outcome": {
+          "stop": {
+            "reason": "requested"
+          }
+        },
+        "request": "stop"
+      }
+    },
+    "program_ref": {
+      "content_digest": "content:sha256-v1:7029c8e595eb1a6abbad1cc70cdcc28dbe091666065de7d75093ef55e2aaa542",
+      "schema_id": "schema:mfm-program-document:9:sha256-jcs-v1:efc3e77ec55f6e3963c52bcdc8dfe856e70dddd17ea59cfa1cb5f8beaaf82b94"
+    },
+    "usage": [
+      {
+        "restarts": 0,
+        "retries": 0
+      }
+    ]
+  },
+  "previous_head_digest": "content:sha256-v1:0fbd4453d946259fd06afa7d9346e82d5e93b3df9652e779a1988961c36cccb7",
+  "run_id": "run:sha256-jcs-v1:bfbfbfbfbfbfbfbfbfbfbfbfbfbfbfbfbfbfbfbfbfbfbfbfbfbfbfbfbfbfbfbf",
+  "run_sequence": 3
+}

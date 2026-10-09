@@ -1,0 +1,87 @@
+[
+  {
+    "name": "scripted-command-frame",
+    "bytes": 6602,
+    "sha256": "380f73fde7ddd3fb70c677fe013eb6e567d097fa070c275b086b001d04222741"
+  },
+  {
+    "name": "scripted-settlement-frame",
+    "bytes": 7591,
+    "sha256": "34b018b72b30526e27e066e6432e4b11a7ddfb16f84247f92be077c5f9bed86b"
+  },
+  {
+    "name": "scripted-complete-deployment",
+    "bytes": 6588,
+    "sha256": "b43fa5e3d44c39be1c52b186ee4925c5c5902e711e3355cd33540e08c0b2495c"
+  },
+  {
+    "name": "scripted-observer-summary",
+    "bytes": 871,
+    "sha256": "a648a368a43dc7488699a05a6c04cdea19cdc097980462d9a7bfcf1268123be1"
+  },
+  {
+    "name": "scripted-winning-wire",
+    "bytes": 1649,
+    "sha256": "5ed08165cb138e5a76061abc1121d7c3d1cdb79621bf1ad1fb58360e0b2b8946"
+  },
+  {
+    "name": "scripted-complete-configuration",
+    "bytes": 9637,
+    "sha256": "2e21dbb1fa6a4f3855f791dde63bec4a5902954766140f24a115527b7b549c98"
+  },
+  {
+    "name": "scripted-partial-outcome",
+    "bytes": 8093,
+    "sha256": "395ff8b3974f4f1882cfa9e42cee24c77bc60e5c513782f89be275e6289667ed"
+  },
+  {
+    "name": "old-control-authority-lineage",
+    "bytes": 1919,
+    "sha256": "e333ddbd99fc63b8f28829d28d6b15d216d43113c163d92ea30657d9fedab9f5"
+  },
+  {
+    "name": "managed-command-frame",
+    "bytes": 6602,
+    "sha256": "c3b890b2b48a54374bd371a001b2fce65952c61ece5ecf229cba9ecc124c0b34"
+  },
+  {
+    "name": "managed-authority-after-broadcast",
+    "bytes": 1921,
+    "sha256": "84ca4fb3c55ab55dc18a4cfa13856428de3705b11ad940a60099a71906850a82"
+  },
+  {
+    "name": "managed-node-deployment-receipt",
+    "bytes": 325,
+    "sha256": "533ff9491e15bf40380f4e5e4b6f6677065b722586f961b97f7b53159264ef8f"
+  },
+  {
+    "name": "managed-settlement-frame",
+    "bytes": 7592,
+    "sha256": "b2c8f554cbae80766d306872fde6f3181150def0c81c046d1a72a8de3c31b2b3"
+  },
+  {
+    "name": "managed-complete-deployment",
+    "bytes": 6590,
+    "sha256": "a534a66bf477afed6257e99310212c31234d68f23d06e66eb438d7808b8d5986"
+  },
+  {
+    "name": "managed-observer-summary",
+    "bytes": 871,
+    "sha256": "c4a6716a300d69bdb535a2b2f1dcd2662b52e1ecc5e311d5832016c90b75ed79"
+  },
+  {
+    "name": "managed-independent-scalar-observation",
+    "bytes": 465,
+    "sha256": "4756f3890d9322ba2797cea3b8c76e8275987b5461c39f44a136a78233bf0fe8"
+  },
+  {
+    "name": "managed-complete-configuration",
+    "bytes": 9641,
+    "sha256": "7c38bcefdf7664051247822bc1183190c19165a5cc5a6ecdf4c31cc5ae04a098"
+  },
+  {
+    "name": "managed-configuration-authority",
+    "bytes": 1121,
+    "sha256": "027b3bfb90260c64d4503724421e279b122ba45fddb9f2265104b8c2792e081a"
+  }
+]

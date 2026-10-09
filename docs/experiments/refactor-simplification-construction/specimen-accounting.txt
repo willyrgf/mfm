@@ -1,0 +1,58 @@
+OWNER-BOUND 32c5283c..6b0ecac9
+72	0	crates/domains/evm/tests/simplification/compile_fail/free_binder.rs
+5	6	crates/domains/evm/tests/simplification/compile_fail/observation.rs
+10	2	crates/domains/evm/tests/simplification/compile_fail/run.sh
+17	16	crates/domains/evm/tests/simplification/extension.rs
+12	10	crates/domains/evm/tests/simplification/holdings.rs
+214	30	crates/domains/evm/tests/simplification_construction.rs
+17	24	crates/domains/evm/tests/simplification_extension.rs
+1	1	crates/domains/evm/tests/simplification_holdings.rs
+31	24	crates/kernel/program/src/experiment_bridge.rs
+235	38	crates/live/evm/tests/refactor_effect.rs
+1	0	crates/live/evm/tests/support/refactor_effect_managed.rs
+
+CONFIGURED-SELECTION 6b0ecac9..cb2a95ff
+70	0	crates/domains/evm/tests/simplification/compile_fail/concrete_binding.rs
+2	1	crates/domains/evm/tests/simplification/compile_fail/run.sh
+12	1	crates/domains/evm/tests/simplification/holdings.rs
+982	0	crates/domains/evm/tests/simplification_configured.rs
+72	24	crates/domains/evm/tests/simplification_construction.rs
+6	12	crates/domains/evm/tests/simplification_extension.rs
+1	2	crates/domains/evm/tests/simplification_holdings.rs
+83	21	crates/kernel/program/src/experiment_bridge.rs
+76	24	crates/live/evm/tests/refactor_effect.rs
+
+FOLLOWUP TOTAL 32c5283c..cb2a95ff
+70	0	crates/domains/evm/tests/simplification/compile_fail/concrete_binding.rs
+72	0	crates/domains/evm/tests/simplification/compile_fail/free_binder.rs
+5	6	crates/domains/evm/tests/simplification/compile_fail/observation.rs
+11	2	crates/domains/evm/tests/simplification/compile_fail/run.sh
+17	16	crates/domains/evm/tests/simplification/extension.rs
+24	11	crates/domains/evm/tests/simplification/holdings.rs
+982	0	crates/domains/evm/tests/simplification_configured.rs
+273	41	crates/domains/evm/tests/simplification_construction.rs
+23	36	crates/domains/evm/tests/simplification_extension.rs
+2	3	crates/domains/evm/tests/simplification_holdings.rs
+112	43	crates/kernel/program/src/experiment_bridge.rs
+297	48	crates/live/evm/tests/refactor_effect.rs
+1	0	crates/live/evm/tests/support/refactor_effect_managed.rs
+
+COMPLETE DISPOSABLE SPECIMEN a478fc34..cb2a95ff
+7	0	crates/domains/evm/tests/simplification/compile_fail/adjacency.rs
+70	0	crates/domains/evm/tests/simplification/compile_fail/concrete_binding.rs
+72	0	crates/domains/evm/tests/simplification/compile_fail/free_binder.rs
+64	0	crates/domains/evm/tests/simplification/compile_fail/observation.rs
+42	0	crates/domains/evm/tests/simplification/compile_fail/run.sh
+349	0	crates/domains/evm/tests/simplification/extension.rs
+259	0	crates/domains/evm/tests/simplification/holdings.rs
+982	0	crates/domains/evm/tests/simplification_configured.rs
+1157	0	crates/domains/evm/tests/simplification_construction.rs
+525	0	crates/domains/evm/tests/simplification_extension.rs
+129	0	crates/domains/evm/tests/simplification_holdings.rs
+1037	0	crates/kernel/program/src/experiment_bridge.rs
+3	0	crates/kernel/program/src/lib.rs
+1	0	crates/live/evm/src/lib.rs
+84	0	crates/live/evm/src/refactor_effect_custody.rs
+1203	0	crates/live/evm/tests/refactor_effect.rs
+455	0	crates/live/evm/tests/support/refactor_effect_managed.rs
+4	0	nixfied.nix

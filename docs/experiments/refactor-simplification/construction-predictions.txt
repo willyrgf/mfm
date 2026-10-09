@@ -1,0 +1,40 @@
+# Construction/canonical predictions before implementation
+
+Assigned worker: gpt-6.1-sol, high (assignment metadata; no separate model introspection).
+
+## Seam and ownership
+
+Own disposable `crates/kernel/program/src/experiment_bridge.rs`, the one `lib.rs` module export, `crates/domains/evm/tests/simplification_construction.rs`, and construction-only support under `tests/simplification/`. No manifest edits without coordinator notice. Extension owns `tests/simplification_extension.rs` and extension-only support; Effect owns `tests/simplification_effect.rs` and effect-only support, consuming these ports without editing bridge.
+
+A direct builder installs typed factories then creates Program's crate-private StateData, ProgramDocument and ExecutableState and calls real Program::freeze. It does not call compile, AuthoringSource, InjectRead/Effect, Resolve or source lowering. The current v9 NativeAbi wire remains a narrowly fenced adapter: semantic/native request slots coincide; evidence/native_evidence slots coincide with Receipt. Ephemeral Observation has no descriptor or encoding. Current Runtime, Values, Journal and MemoryStore execute that document.
+
+Factory installation associates S + A + resource owner R and records private TypeId owners. A consuming Builder<Current> accepts S only with S::Input=Current and returns Builder<S::Output>. Selected leaf retains private owner claims; finish checks complete claims and document before resource attachment. ReadState has Request:MfmValue, Observation (no bound), prepare and interpret; NativeRead<Request,Observation> has Binding/Receipt/Fault stored contracts, check_request, observe async, and project(binding,selected_leaf_ref,request_ref,request,original,&decoded_receipt). Bound resources are explicit typed attach functions. Common callback code contains no native dispatch.
+
+Effect seam should use matching NativeEffect/EffectState provisional traits and factory callback installation via generic bridge methods. Coordinator or Effect worker supplies its Effect callback constructor if shared bridge scope needs to stay small; no Runtime duplication is acceptable.
+
+## Predetermined observations and failure consequences
+
+1. Actual lifecycle is ConfiguredContract -> Observe -> Validate -> Report. Effective and observed value are decimal `42`; target is EVM address bytes [4;20]; configuration observation anchor is number 7/hash [7;32]. Provider independently records target, getter calldata `3fa4f245`, exact anchor and request ref. Complete report retains exact supplied deployment/configuration native originals and exact admitted getter original. Its observation code provenance equals factory-selected intrinsic leaf ref. Existing field `implementation_ref` is a disposable stand-in only; target leaf_ref schema remains unvalidated. Input stays borrowed with caller and Runtime independently rejects changed value before admission/provider call.
+
+2. Canonical normalization is a separate minimal Read codec fragment to avoid falsifying EVM scalar evidence. Both Request and Receipt Rust field start at 9 and legal serializer emits complete literal canonical JSON `{"value":7}`. Factory check, provider argument, projection decoded receipt and resulting output all equal 7. Each original serializer executes once. A bypass observer reads underlying Store frame bytes and independently asserts retained original literal JSON and ref; hot/cold equality alone is insufficient.
+
+3. Lifecycle Observation is plain Rust data containing ContractValueEvidence and a Cell field, with no Serialize/Deserialize/MfmValue/Sync. It is created and consumed inside one fused pure blocking callback. Wrong Observation factory association and wrong ConfiguredContract->Report adjacency fail independent consuming cargo checks with type mismatch. No incidental diagnostic wording is asserted.
+
+4. A ShadowObserve claims the selected semantic descriptor but is a different concrete owner. Finishing against the catalog rejects it before resource attachment (binder counter zero) or provider IO (counter zero). No owner substitution is permitted.
+
+5. Local binding mismatch has zero provider calls and zero Read original/outcome append beyond admission; Runtime returns internal invocation cause with operation. Native operational Fault carries distinguishable nested owner/cause fields, is acknowledged before classification, retains classification meaning, and cold inspection retains exact original without provider calls. Failed Store append is not claimed audited.
+
+6. Recreating installed factories can qualify same current-wire document and inspect retained completed result without IO. This cannot establish target-wire cold restoration or executable-byte authenticity. Observation-only specialization collision is reachable at provisional intrinsic descriptor/TypeId claims if bridge defines that descriptor; whether authoritative target association is exercised must be recorded explicitly.
+
+## Trace and repetition
+
+Lifecycle Observe prepares shared route/target/point request; native check qualifies route/ledger/target before async IO; native ingress returns qualified receipt or native fault; Program encodes admitted original once and decodes the same Object; owner projection receives original plus selected code ref; State interprets into ObservedConfiguration; Runtime acknowledges original/outcome together. Validate checks retained expected scalar, Report moves full retained facts. Projection/interpretation may repeat before acknowledgement because Reads are duplicate-safe. Completed retained Read output is inspectable without provider IO.
+
+Portfolio current flow individually acknowledges supporting and designated Reads and confirmation before advancing confirmed prefix. That implementation does not by itself establish a product requirement for per-source collection acknowledgement. The extension challenge should use genuine anchored raw-unit holdings semantics, common ledger/target/point and requested decimal scale; protocol-specific identity/anchor qualification belongs with owner. Do not force the distinct Portfolio fixture into scalar lifecycle.
+
+## Material uncertainties
+
+- Assume old-wire validation admits coincident semantic/native request and receipt slots; current wire checker coupling is uncertain. If wrong, seam may become larger than bounded experiment. Validate immediately with focused bridge compile/execution; report obstruction rather than duplicate Runtime.
+- Assume bridge remains roughly 400 lines plus roughly 400 lines construction specimen. Exact error/panic containment and independent oracle requirements may enlarge it. If substantially duplicate execution machinery is required, stop and report concrete obstruction.
+- Target Program descriptor/restore and evidence leaf_ref schema are outside old-wire mechanism. Treat as unvalidated unless separately exercised, even if current-wire cold result succeeds.
+- Portfolio per-source interruption acknowledgement requirement is not explicit in inspected consumer code. Sharing a whole-collection Read cannot be supported from current stages alone; coordinator must retain unresolved requirement.

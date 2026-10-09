@@ -1,0 +1,376 @@
+{
+  "domain": "mfm.configured-followup.expected.v1",
+  "native_bindings": [
+    {
+      "anchor": {
+        "hash": "0x0707070707070707070707070707070707070707070707070707070707070707",
+        "number": "7"
+      },
+      "chain": {
+        "chain_id": 31337,
+        "expected_genesis_hash": "0x0101010101010101010101010101010101010101010101010101010101010101"
+      },
+      "route": "scalar-alpha"
+    },
+    {
+      "book": 19,
+      "gateway": "book-gateway",
+      "policy": "scripted-fixed-snapshot@1",
+      "sequence": 117
+    },
+    {
+      "anchor": {
+        "hash": "0x0909090909090909090909090909090909090909090909090909090909090909",
+        "number": "19"
+      },
+      "chain": {
+        "chain_id": 8453,
+        "expected_genesis_hash": "0x0202020202020202020202020202020202020202020202020202020202020202"
+      },
+      "route": "scalar-beta"
+    }
+  ],
+  "native_originals": [
+    {
+      "canonical": {
+        "anchor": {
+          "hash": "0x0707070707070707070707070707070707070707070707070707070707070707",
+          "number": "7"
+        },
+        "chain": {
+          "chain_id": 31337,
+          "expected_genesis_hash": "0x0101010101010101010101010101010101010101010101010101010101010101"
+        },
+        "query": {
+          "content_digest": "content:sha256-v1:a4d1f7f399fe9f5767b13d79c17e17a44fe1e7366bf0d68ccd1083645d6704af",
+          "schema_id": "schema:mfm.derived.collection_request:1:sha256-jcs-v1:0fb134d0ead7684bfd2e87e7dc494bb360cd92aa18bf5ac71f0ea6d3fa817c30"
+        },
+        "results": [
+          {
+            "decimals": 6,
+            "target": {
+              "account": "0x0303030303030303030303030303030303030303",
+              "token": null
+            },
+            "units": "1234500"
+          },
+          {
+            "decimals": 18,
+            "target": {
+              "account": "0x0404040404040404040404040404040404040404",
+              "token": "0x0505050505050505050505050505050505050505"
+            },
+            "units": "42000000000000000000"
+          }
+        ]
+      },
+      "value_ref": {
+        "content_digest": "content:sha256-v1:dca9c9a1d43ac4966bb2db51fe36b643984bc0a7472d3bc9b3f664876f5ac3f0",
+        "schema_id": "schema:mfm.derived.scalar_receipt:1:sha256-jcs-v1:6d20ea0ce18ba401062c0d593c3df7a489525448598729d5b171af1a30776b41"
+      }
+    },
+    {
+      "canonical": {
+        "snapshot": {
+          "book": 19,
+          "lines": [
+            {
+              "account": "empty",
+              "denomination": 0,
+              "meaning": "holding",
+              "quantity": "0"
+            },
+            {
+              "account": "retained",
+              "denomination": 0,
+              "meaning": "holding",
+              "quantity": "42"
+            }
+          ],
+          "request_ref": {
+            "content_digest": "content:sha256-v1:e8f702fd88d711263e3aef26e6251265aff0792b1a160290c9438fc31557f2d7",
+            "schema_id": "schema:mfm.derived.collection_request:1:sha256-jcs-v1:0fb134d0ead7684bfd2e87e7dc494bb360cd92aa18bf5ac71f0ea6d3fa817c30"
+          },
+          "sequence": 117
+        }
+      },
+      "value_ref": {
+        "content_digest": "content:sha256-v1:59e9686978988b93587c57ca4a9b9cb6b89b6480486a61c3f9f9316cba259dd5",
+        "schema_id": "schema:mfm.derived.book_receipt:1:sha256-jcs-v1:a5d7834495791016983afb05a28d695598867182afa64fe21a15276f8953e838"
+      }
+    },
+    {
+      "canonical": {
+        "anchor": {
+          "hash": "0x0909090909090909090909090909090909090909090909090909090909090909",
+          "number": "19"
+        },
+        "chain": {
+          "chain_id": 8453,
+          "expected_genesis_hash": "0x0202020202020202020202020202020202020202020202020202020202020202"
+        },
+        "query": {
+          "content_digest": "content:sha256-v1:89de70da12175940f2d79843137ab33b35ee5d1ecd6625247e9033347226175d",
+          "schema_id": "schema:mfm.derived.collection_request:1:sha256-jcs-v1:0fb134d0ead7684bfd2e87e7dc494bb360cd92aa18bf5ac71f0ea6d3fa817c30"
+        },
+        "results": [
+          {
+            "decimals": 6,
+            "target": {
+              "account": "0x0303030303030303030303030303030303030303",
+              "token": null
+            },
+            "units": "1234500"
+          },
+          {
+            "decimals": 18,
+            "target": {
+              "account": "0x0404040404040404040404040404040404040404",
+              "token": "0x0505050505050505050505050505050505050505"
+            },
+            "units": "42000000000000000000"
+          }
+        ]
+      },
+      "value_ref": {
+        "content_digest": "content:sha256-v1:f10114b9096b573b0ce431f436e9ddf63cb9dc8e5e6ec45d6ad78dabe394a458",
+        "schema_id": "schema:mfm.derived.scalar_receipt:1:sha256-jcs-v1:6d20ea0ce18ba401062c0d593c3df7a489525448598729d5b171af1a30776b41"
+      }
+    }
+  ],
+  "requests": [
+    {
+      "canonical": {
+        "ledger": {
+          "native": {
+            "canonical": {
+              "chain_id": 31337,
+              "expected_genesis_hash": "0x0101010101010101010101010101010101010101010101010101010101010101"
+            },
+            "value_ref": {
+              "content_digest": "content:sha256-v1:a4a2ece0a165ea61cc88aa123e7c6df34ca95361ade4a7d403e719e292988747",
+              "schema_id": "schema:mfm.evm-chain-instance:1:sha256-jcs-v1:378351854b8dd0c43b4b12c6d8f57f26e2614805ead0285a91ebc6416e432c3a"
+            }
+          }
+        },
+        "policy": "scripted-evm-anchor@1",
+        "route": "scalar-alpha",
+        "sources": [
+          {
+            "id": "native",
+            "target": {
+              "ledger": {
+                "native": {
+                  "canonical": {
+                    "chain_id": 31337,
+                    "expected_genesis_hash": "0x0101010101010101010101010101010101010101010101010101010101010101"
+                  },
+                  "value_ref": {
+                    "content_digest": "content:sha256-v1:a4a2ece0a165ea61cc88aa123e7c6df34ca95361ade4a7d403e719e292988747",
+                    "schema_id": "schema:mfm.evm-chain-instance:1:sha256-jcs-v1:378351854b8dd0c43b4b12c6d8f57f26e2614805ead0285a91ebc6416e432c3a"
+                  }
+                }
+              },
+              "native": {
+                "canonical": {
+                  "account": "0x0303030303030303030303030303030303030303",
+                  "token": null
+                },
+                "value_ref": {
+                  "content_digest": "content:sha256-v1:6cd565599e36222526a86d9ef6479e8bef9f117a51fb762ba432ec056661d1f3",
+                  "schema_id": "schema:mfm.evm-balance-target:1:sha256-jcs-v1:61dbb1f55e278f4cdec1f3f8a86765cad1bca60f1308deaf88e26772e5046995"
+                }
+              }
+            }
+          },
+          {
+            "id": "token",
+            "target": {
+              "ledger": {
+                "native": {
+                  "canonical": {
+                    "chain_id": 31337,
+                    "expected_genesis_hash": "0x0101010101010101010101010101010101010101010101010101010101010101"
+                  },
+                  "value_ref": {
+                    "content_digest": "content:sha256-v1:a4a2ece0a165ea61cc88aa123e7c6df34ca95361ade4a7d403e719e292988747",
+                    "schema_id": "schema:mfm.evm-chain-instance:1:sha256-jcs-v1:378351854b8dd0c43b4b12c6d8f57f26e2614805ead0285a91ebc6416e432c3a"
+                  }
+                }
+              },
+              "native": {
+                "canonical": {
+                  "account": "0x0404040404040404040404040404040404040404",
+                  "token": "0x0505050505050505050505050505050505050505"
+                },
+                "value_ref": {
+                  "content_digest": "content:sha256-v1:9644595f2daac76a8959d38ac12e5ff37891e3b93c39a1131c8a9415ecb886a8",
+                  "schema_id": "schema:mfm.evm-balance-target:1:sha256-jcs-v1:61dbb1f55e278f4cdec1f3f8a86765cad1bca60f1308deaf88e26772e5046995"
+                }
+              }
+            }
+          }
+        ]
+      },
+      "value_ref": {
+        "content_digest": "content:sha256-v1:a4d1f7f399fe9f5767b13d79c17e17a44fe1e7366bf0d68ccd1083645d6704af",
+        "schema_id": "schema:mfm.derived.collection_request:1:sha256-jcs-v1:0fb134d0ead7684bfd2e87e7dc494bb360cd92aa18bf5ac71f0ea6d3fa817c30"
+      }
+    },
+    {
+      "canonical": {
+        "ledger": {
+          "native": {
+            "canonical": {
+              "book": 19
+            },
+            "value_ref": {
+              "content_digest": "content:sha256-v1:34703e0c3065c2491adec843443ca8ee8e70647ab0ac07087a63471853e88e37",
+              "schema_id": "schema:mfm.derived.book_ledger:1:sha256-jcs-v1:e38bae1fb4bbfbc3a1353f184da8a38598f5cef0193ab3cbc073de5c8900d1a6"
+            }
+          }
+        },
+        "policy": "scripted-fixed-snapshot@1",
+        "route": "book-gateway",
+        "sources": [
+          {
+            "id": "retained",
+            "target": {
+              "ledger": {
+                "native": {
+                  "canonical": {
+                    "book": 19
+                  },
+                  "value_ref": {
+                    "content_digest": "content:sha256-v1:34703e0c3065c2491adec843443ca8ee8e70647ab0ac07087a63471853e88e37",
+                    "schema_id": "schema:mfm.derived.book_ledger:1:sha256-jcs-v1:e38bae1fb4bbfbc3a1353f184da8a38598f5cef0193ab3cbc073de5c8900d1a6"
+                  }
+                }
+              },
+              "native": {
+                "canonical": {
+                  "account": "retained",
+                  "asset": "BASE",
+                  "meaning": "holding"
+                },
+                "value_ref": {
+                  "content_digest": "content:sha256-v1:833cca23c3e01a6dac6215cf087cf74b1553e6827813fc86c996bd0ff1c95ca6",
+                  "schema_id": "schema:mfm.derived.book_account:1:sha256-jcs-v1:636611ac69b0230989f150c2fb3c5b9edc3ab94ec77353c0eeddb2e029dd4476"
+                }
+              }
+            }
+          },
+          {
+            "id": "empty",
+            "target": {
+              "ledger": {
+                "native": {
+                  "canonical": {
+                    "book": 19
+                  },
+                  "value_ref": {
+                    "content_digest": "content:sha256-v1:34703e0c3065c2491adec843443ca8ee8e70647ab0ac07087a63471853e88e37",
+                    "schema_id": "schema:mfm.derived.book_ledger:1:sha256-jcs-v1:e38bae1fb4bbfbc3a1353f184da8a38598f5cef0193ab3cbc073de5c8900d1a6"
+                  }
+                }
+              },
+              "native": {
+                "canonical": {
+                  "account": "empty",
+                  "asset": "BASE",
+                  "meaning": "holding"
+                },
+                "value_ref": {
+                  "content_digest": "content:sha256-v1:8a812d735cfad642702cb76531b8514143a6f83d94330fae3df3366d088939ff",
+                  "schema_id": "schema:mfm.derived.book_account:1:sha256-jcs-v1:636611ac69b0230989f150c2fb3c5b9edc3ab94ec77353c0eeddb2e029dd4476"
+                }
+              }
+            }
+          }
+        ]
+      },
+      "value_ref": {
+        "content_digest": "content:sha256-v1:e8f702fd88d711263e3aef26e6251265aff0792b1a160290c9438fc31557f2d7",
+        "schema_id": "schema:mfm.derived.collection_request:1:sha256-jcs-v1:0fb134d0ead7684bfd2e87e7dc494bb360cd92aa18bf5ac71f0ea6d3fa817c30"
+      }
+    },
+    {
+      "canonical": {
+        "ledger": {
+          "native": {
+            "canonical": {
+              "chain_id": 8453,
+              "expected_genesis_hash": "0x0202020202020202020202020202020202020202020202020202020202020202"
+            },
+            "value_ref": {
+              "content_digest": "content:sha256-v1:38ffe52582558debef07b474a79cb4058895bd3e4148d17b9fcd772122fc5b5d",
+              "schema_id": "schema:mfm.evm-chain-instance:1:sha256-jcs-v1:378351854b8dd0c43b4b12c6d8f57f26e2614805ead0285a91ebc6416e432c3a"
+            }
+          }
+        },
+        "policy": "scripted-evm-anchor@1",
+        "route": "scalar-beta",
+        "sources": [
+          {
+            "id": "native",
+            "target": {
+              "ledger": {
+                "native": {
+                  "canonical": {
+                    "chain_id": 8453,
+                    "expected_genesis_hash": "0x0202020202020202020202020202020202020202020202020202020202020202"
+                  },
+                  "value_ref": {
+                    "content_digest": "content:sha256-v1:38ffe52582558debef07b474a79cb4058895bd3e4148d17b9fcd772122fc5b5d",
+                    "schema_id": "schema:mfm.evm-chain-instance:1:sha256-jcs-v1:378351854b8dd0c43b4b12c6d8f57f26e2614805ead0285a91ebc6416e432c3a"
+                  }
+                }
+              },
+              "native": {
+                "canonical": {
+                  "account": "0x0303030303030303030303030303030303030303",
+                  "token": null
+                },
+                "value_ref": {
+                  "content_digest": "content:sha256-v1:6cd565599e36222526a86d9ef6479e8bef9f117a51fb762ba432ec056661d1f3",
+                  "schema_id": "schema:mfm.evm-balance-target:1:sha256-jcs-v1:61dbb1f55e278f4cdec1f3f8a86765cad1bca60f1308deaf88e26772e5046995"
+                }
+              }
+            }
+          },
+          {
+            "id": "token",
+            "target": {
+              "ledger": {
+                "native": {
+                  "canonical": {
+                    "chain_id": 8453,
+                    "expected_genesis_hash": "0x0202020202020202020202020202020202020202020202020202020202020202"
+                  },
+                  "value_ref": {
+                    "content_digest": "content:sha256-v1:38ffe52582558debef07b474a79cb4058895bd3e4148d17b9fcd772122fc5b5d",
+                    "schema_id": "schema:mfm.evm-chain-instance:1:sha256-jcs-v1:378351854b8dd0c43b4b12c6d8f57f26e2614805ead0285a91ebc6416e432c3a"
+                  }
+                }
+              },
+              "native": {
+                "canonical": {
+                  "account": "0x0404040404040404040404040404040404040404",
+                  "token": "0x0505050505050505050505050505050505050505"
+                },
+                "value_ref": {
+                  "content_digest": "content:sha256-v1:9644595f2daac76a8959d38ac12e5ff37891e3b93c39a1131c8a9415ecb886a8",
+                  "schema_id": "schema:mfm.evm-balance-target:1:sha256-jcs-v1:61dbb1f55e278f4cdec1f3f8a86765cad1bca60f1308deaf88e26772e5046995"
+                }
+              }
+            }
+          }
+        ]
+      },
+      "value_ref": {
+        "content_digest": "content:sha256-v1:89de70da12175940f2d79843137ab33b35ee5d1ecd6625247e9033347226175d",
+        "schema_id": "schema:mfm.derived.collection_request:1:sha256-jcs-v1:0fb134d0ead7684bfd2e87e7dc494bb360cd92aa18bf5ac71f0ea6d3fa817c30"
+      }
+    }
+  ]
+}

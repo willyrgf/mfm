@@ -1,0 +1,59 @@
+All direct Cargo/Rust tools ran in the default Nix shell.
+Final disposable candidate: 32c5283cb969ad30310ba98d6a378b5a84d40fdd, clean tracked source.
+Baseline code: a478fc341d993f3b9b747d72c53a6f027be41452.
+
+Control checkout 36a178f6 (documentation-only descendants of baseline; no Rust diff):
+  nix develop -c cargo test -p mfm-program --test claim_conflicts
+  exit 0; 3 passed, 0 failed, 0 ignored; control-claim-conflicts.log.gz.
+
+Final candidate focused probes (same exact code, final formatting):
+  nix develop -c cargo test -p mfm-evm --test simplification_construction --test simplification_holdings --test simplification_extension -- --nocapture
+  exit 0; construction 7 + extension 5 + holdings 1 passed, 0 failed/ignored; read-probes.log.gz.
+  nix develop -c bash crates/domains/evm/tests/simplification/compile_fail/run.sh /tmp/mfm-final-evidence/compile-fail
+  shell exit 0; adjacency cargo 101 E0271; Observation cargo 101 E0277; compile-fail.log.gz and compile-{adjacency,observation}.log.gz.
+  nix develop -c cargo-fmt fmt --all -- --check
+  exit 0; fmt.log.gz.
+
+Iteration details:
+  The preformat c819369f candidate formatting check exited 1 for two import/module order differences. Pinned cargo-fmt corrected only those lines, then final 32c5283c formatting passed. No behavior changed.
+  Workers' earlier focused compilation, tests, Clippy and manifest results are itemized in their handoff records. They are not substituted for the final exact-candidate gates.
+  Initial managed effect-e2e passed before final trace/creation-term-observer assertions. Final evidence uses the exact-candidate CI and focused export reexecution, not that older result.
+
+Final candidate broad gate, attempt1:
+  nix run .#ci
+  exit 30; 4 tasks passed, 1 failed; Cargo task exit 101 due ENOSPC during compilation, not an assertion failure.
+  run-e4757c858efdb8b21f35680fc4acfdbe;ci-enospc.log.gz.
+Recovery, candidate unchanged:
+  nix develop -c cargo clean --profile dev
+  exit 0; removed only owned disposable focused-build cache, 30,745 files, 5.3 GiB reported logical total. User checkout cache untouched.
+Final candidate broad gate, attempt2:
+  nix run .#ci
+  exit 38; ENOSPC compiling mfm-evm lifecycle_runtime in the Effect lane; not an assertion failure.
+  ci-enospc-2.log.gz; log ends during rustc diagnostics because the filesystem filled.
+Recovery, candidate unchanged:
+  Relocated only owned disposable target/verification/debug/deps static .rlib files to owned /dev/shm/mfm-simplification-owned-cache-32c5283c and symlinked original paths. Verified SHA256 before/after each copy. Executable/shared-library files were not moved; user checkout cache untouched.
+  682 files, 1,828,274,418 bytes; cache-relocation.json.gz records paths and hashes.
+Final candidate broad gate, attempt3:
+  nix run .#ci
+  exit 0; 9 tasks passed, 0 failed, 703.46 seconds; ci.log.gz.
+  run-bd2cb65d99b5e2af8a45b27e294c8dd0.
+  Explicit candidate scripted Effect test: 1 passed, 0 failed, 8.17 seconds.
+  Explicit candidate managed Effect test: 1 passed, 0 failed, 23.25 seconds.
+
+Archival correction, unchanged candidate:
+  Initial extraction from /tmp/mfm-effect-specimen-dumps exited 1 (FileNotFoundError). The task declares TMPDIR=${stateDir}; managed cleanup removed full raw dumps. CI assertions and trace digests remain valid; no old dumps substituted.
+  First two capture-wrapper launches exited 21 STATE_UNOWNED before task execution because the output directory inherited group-write permission. Both logs are retained as export-setup-refusal-{1,2}.log.gz. Wrapper corrected to create mode 0700 directories; no framework safety weakening.
+  python3 docs/experiments/refactor-simplification/capture-effect-evidence.py --worktree /tmp/mfm-simplification-specimen-a478fc34 --output /home/willyrgf.linux/.local/state/mfm-final-effect-export-32c5283c-v2
+  exit 0; effect-e2e 1 task passed, 0 failed, 221.36 seconds; effect-export.log.gz.
+  run-0041e303a87baf0fb6f8056dbf1720b4. Both candidate tests executed explicitly; all 17 raw trace file lengths and SHA256 values matched stdout. This invokes nix run .#effect-e2e with a fresh owned NIXFIED_STATE_DIR and output-only symlink; source and authority/observer code unchanged.
+  python3 docs/experiments/refactor-simplification/extract-effect-evidence.py --dump-dir /home/willyrgf.linux/.local/state/mfm-final-effect-export-32c5283c-v2/dumps --output-dir docs/experiments/refactor-simplification
+  exit 0; scripted-observed.json and managed-observed.json contain this run's selected public facts. The independent reviewer inspected all 17 full temporary traces before disposal.
+
+Documentation-only main checkout:
+  git diff --check and local link/evidence digest review
+  exit 0; exact archived patch matched git diff --binary a478fc34 32c5283c; all JSON/gzip parsed and local links resolved. Final staged whitespace and evidence SHA256 checks passed.
+
+Disposal after independent final review:
+  git worktree remove /tmp/mfm-simplification-specimen-a478fc34
+  exit 0; tracked source was clean, and git clean -ndx identified only target/ as ignored output.
+  Removed only the 682 owned RAM-cache files named in cache-relocation.json.gz and the 17 reviewed full dump files named in the final trace log. Selected public facts, exact patch, logs and reviewer results remain archived. No executable specimen is retained as a supported production API; user checkout caches were untouched.

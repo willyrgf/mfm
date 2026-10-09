@@ -1,0 +1,478 @@
+{
+  "fixture_expectations": {
+    "artifact_sha256": "c7aed441e0afa86de84779ac168d27e4d8a29148b6834565d5930ef7c8ae855d",
+    "artifact_length": 497,
+    "requested": "42",
+    "increment": "0",
+    "deployment_gas": 2000000,
+    "configuration_gas": 200000,
+    "priority_fee": "1000000000",
+    "maximum_fee": "10000000000",
+    "configuration_calldata_hex": "1eb25e0a000000000000000000000000000000000000000000000000000000000000002a",
+    "getter_selector_hex": "3fa4f245",
+    "getter_result_hex": "000000000000000000000000000000000000000000000000000000000000002a"
+  },
+  "program_ref": {
+    "content_digest": "content:sha256-v1:bd35ae0a9f7be3cd8d4b364cc5910ae422e919fa9065aa8441e808a790738a10",
+    "schema_id": "schema:mfm-program-document:9:sha256-jcs-v1:efc3e77ec55f6e3963c52bcdc8dfe856e70dddd17ea59cfa1cb5f8beaaf82b94"
+  },
+  "semantic_command": {
+    "effect_id": "effect:sha256-jcs-v1:c3e776b9a4f42c1cfb6592e6702d93ccb4b1407c766e2c2bb872d91d90784069",
+    "position": {
+      "state": 0,
+      "visit": 0
+    },
+    "value_ref": {
+      "content_digest": "content:sha256-v1:4d7b36aa2aa5db7a0479fd48ef1740dee6274de647dded7e7ee6287a741e6056",
+      "schema_id": "schema:mfm.chain-deployment-request:1:sha256-jcs-v1:b66886f7f6d33d0e02a6e3b1378a5dcdb7f4a73401785aa5c4bf2fac635f2653"
+    }
+  },
+  "complete_native_original": {
+    "canonical": {
+      "native_command_ref": {
+        "content_digest": "content:sha256-v1:4255e498f8e741ea8f24677395304aef17f41b5b5419e018c089a3cdcc9de7d7",
+        "schema_id": "schema:mfm.evm-eip1559-transaction-command:1:sha256-jcs-v1:238fada95370980eebf597f62ab5b57a5beea218b86199c09096785e01cb2768"
+      },
+      "settlement": {
+        "effect_id": "effect:sha256-jcs-v1:c3e776b9a4f42c1cfb6592e6702d93ccb4b1407c766e2c2bb872d91d90784069",
+        "nonce": 0,
+        "outcome": {
+          "kind": "created",
+          "value": {
+            "created_address": "0xb65e9782f29ca1c76b9a6687681079c14b4ffa67"
+          }
+        },
+        "receipt": {
+          "block_anchor": {
+            "hash": "0x2222222222222222222222222222222222222222222222222222222222222222",
+            "number": "7"
+          },
+          "transaction_hash": "0xbc1d8a11530b99a88020e238ec58903fbbb3f89408d11cf476bb3fffa342227f"
+        }
+      }
+    },
+    "value_ref": {
+      "content_digest": "content:sha256-v1:2e7fadcf1c348eb7d955cf2b56f73853f387012ac483936043d4a2b6bd8f0cac",
+      "schema_id": "schema:mfm.experiment-effect-custody-receipt:1:sha256-jcs-v1:4d1dcc989c55a2104c683ef112ac16d7d29c9500ea7fea1f66de297500045ed1"
+    }
+  },
+  "deployment_evidence": {
+    "effect_id": "effect:sha256-jcs-v1:c3e776b9a4f42c1cfb6592e6702d93ccb4b1407c766e2c2bb872d91d90784069",
+    "command_ref": {
+      "content_digest": "content:sha256-v1:4d7b36aa2aa5db7a0479fd48ef1740dee6274de647dded7e7ee6287a741e6056",
+      "schema_id": "schema:mfm.chain-deployment-request:1:sha256-jcs-v1:b66886f7f6d33d0e02a6e3b1378a5dcdb7f4a73401785aa5c4bf2fac635f2653"
+    },
+    "implementation_ref": {
+      "content_digest": "content:sha256-v1:46bc5e64c9cf4446b353a6c3b3aadcdfaf069659aa0f06965af0e73ba64f8943",
+      "schema_id": "schema:mfm-experiment-leaf:1:sha256-jcs-v1:0000000000000000000000000000000000000000000000000000000000000000"
+    },
+    "transaction": {
+      "ledger": {
+        "native": {
+          "value_ref": {
+            "content_digest": "content:sha256-v1:631382515d55927815c267bef98959539ba9f4c814241dea9da98c053ef1a02c",
+            "schema_id": "schema:mfm.evm-chain-instance:1:sha256-jcs-v1:378351854b8dd0c43b4b12c6d8f57f26e2614805ead0285a91ebc6416e432c3a"
+          },
+          "canonical": {
+            "chain_id": 1337,
+            "expected_genesis_hash": "0x1111111111111111111111111111111111111111111111111111111111111111"
+          }
+        }
+      },
+      "native": {
+        "value_ref": {
+          "content_digest": "content:sha256-v1:0a28f409cbc9b48c7ca98ae7a5a83a0c36eb273d805d0addc2c358bbdc5073fe",
+          "schema_id": "schema:mfm.evm-hash:1:sha256-jcs-v1:ac6987ba5dd6d4432514f834a5423e6602cf88e23e2f49f3bbaaedd4cd60cc23"
+        },
+        "canonical": "0xbc1d8a11530b99a88020e238ec58903fbbb3f89408d11cf476bb3fffa342227f"
+      }
+    },
+    "observed_at": {
+      "ledger": {
+        "native": {
+          "value_ref": {
+            "content_digest": "content:sha256-v1:631382515d55927815c267bef98959539ba9f4c814241dea9da98c053ef1a02c",
+            "schema_id": "schema:mfm.evm-chain-instance:1:sha256-jcs-v1:378351854b8dd0c43b4b12c6d8f57f26e2614805ead0285a91ebc6416e432c3a"
+          },
+          "canonical": {
+            "chain_id": 1337,
+            "expected_genesis_hash": "0x1111111111111111111111111111111111111111111111111111111111111111"
+          }
+        }
+      },
+      "native": {
+        "value_ref": {
+          "content_digest": "content:sha256-v1:3b692a8eecf810f94571abb57554ad5198b51f3a2d019bc624df99f946440165",
+          "schema_id": "schema:mfm.evm-block-point:1:sha256-jcs-v1:4e6f07320b60e354512fffe73f039d1b9f00202cf0964fd3d7995c1035ee828f"
+        },
+        "canonical": {
+          "hash": "0x2222222222222222222222222222222222222222222222222222222222222222",
+          "number": "7"
+        }
+      }
+    },
+    "original": {
+      "value_ref": {
+        "content_digest": "content:sha256-v1:2e7fadcf1c348eb7d955cf2b56f73853f387012ac483936043d4a2b6bd8f0cac",
+        "schema_id": "schema:mfm.experiment-effect-custody-receipt:1:sha256-jcs-v1:4d1dcc989c55a2104c683ef112ac16d7d29c9500ea7fea1f66de297500045ed1"
+      },
+      "canonical": {
+        "native_command_ref": {
+          "content_digest": "content:sha256-v1:4255e498f8e741ea8f24677395304aef17f41b5b5419e018c089a3cdcc9de7d7",
+          "schema_id": "schema:mfm.evm-eip1559-transaction-command:1:sha256-jcs-v1:238fada95370980eebf597f62ab5b57a5beea218b86199c09096785e01cb2768"
+        },
+        "settlement": {
+          "effect_id": "effect:sha256-jcs-v1:c3e776b9a4f42c1cfb6592e6702d93ccb4b1407c766e2c2bb872d91d90784069",
+          "nonce": 0,
+          "outcome": {
+            "kind": "created",
+            "value": {
+              "created_address": "0xb65e9782f29ca1c76b9a6687681079c14b4ffa67"
+            }
+          },
+          "receipt": {
+            "block_anchor": {
+              "hash": "0x2222222222222222222222222222222222222222222222222222222222222222",
+              "number": "7"
+            },
+            "transaction_hash": "0xbc1d8a11530b99a88020e238ec58903fbbb3f89408d11cf476bb3fffa342227f"
+          }
+        }
+      }
+    },
+    "result": {
+      "applied": {
+        "output": {
+          "ledger": {
+            "native": {
+              "value_ref": {
+                "content_digest": "content:sha256-v1:631382515d55927815c267bef98959539ba9f4c814241dea9da98c053ef1a02c",
+                "schema_id": "schema:mfm.evm-chain-instance:1:sha256-jcs-v1:378351854b8dd0c43b4b12c6d8f57f26e2614805ead0285a91ebc6416e432c3a"
+              },
+              "canonical": {
+                "chain_id": 1337,
+                "expected_genesis_hash": "0x1111111111111111111111111111111111111111111111111111111111111111"
+              }
+            }
+          },
+          "native": {
+            "value_ref": {
+              "content_digest": "content:sha256-v1:b857e8f38e2ac055055f8cd41c2d0a24b03fcc363c6c926f4131d69529248ba1",
+              "schema_id": "schema:mfm.evm-address:1:sha256-jcs-v1:62ac7e52b8bd00da7f684795487a1faefc5d3b2536d50984fbcc884e0af88455"
+            },
+            "canonical": "0xb65e9782f29ca1c76b9a6687681079c14b4ffa67"
+          }
+        }
+      }
+    }
+  },
+  "effective": "42",
+  "configuration_evidence": {
+    "effect_id": "effect:sha256-jcs-v1:7af47c2fd4e5287c057a48b43326598d3a35d3a54c9d6bbcf2cf8cca7c6788c9",
+    "command_ref": {
+      "content_digest": "content:sha256-v1:f05256e3b76b43a3c9de5bad93a76a3e53d31c80f2b6d745e91cff0393433cab",
+      "schema_id": "schema:mfm.chain-deployed-contract:1:sha256-jcs-v1:cd19c62486c9a0d87a30fb53d2ee4a6457d47322c6f2df4bbc1284a3a014dbfd"
+    },
+    "implementation_ref": {
+      "content_digest": "content:sha256-v1:1417e5d52cbe355a4c2b8241174dd94383996e8218ce129ced63736947c7c3c9",
+      "schema_id": "schema:mfm-experiment-leaf:1:sha256-jcs-v1:0000000000000000000000000000000000000000000000000000000000000000"
+    },
+    "transaction": {
+      "ledger": {
+        "native": {
+          "value_ref": {
+            "content_digest": "content:sha256-v1:631382515d55927815c267bef98959539ba9f4c814241dea9da98c053ef1a02c",
+            "schema_id": "schema:mfm.evm-chain-instance:1:sha256-jcs-v1:378351854b8dd0c43b4b12c6d8f57f26e2614805ead0285a91ebc6416e432c3a"
+          },
+          "canonical": {
+            "chain_id": 1337,
+            "expected_genesis_hash": "0x1111111111111111111111111111111111111111111111111111111111111111"
+          }
+        }
+      },
+      "native": {
+        "value_ref": {
+          "content_digest": "content:sha256-v1:563b5fb33590355b6426cbc52b870edda222ff08d9be0813e95f43a1934c0ec0",
+          "schema_id": "schema:mfm.evm-hash:1:sha256-jcs-v1:ac6987ba5dd6d4432514f834a5423e6602cf88e23e2f49f3bbaaedd4cd60cc23"
+        },
+        "canonical": "0x4c07957fbef47588037dc84743a65bd6b0e0c82f34f3a17b467c19f3e7f6db85"
+      }
+    },
+    "observed_at": {
+      "ledger": {
+        "native": {
+          "value_ref": {
+            "content_digest": "content:sha256-v1:631382515d55927815c267bef98959539ba9f4c814241dea9da98c053ef1a02c",
+            "schema_id": "schema:mfm.evm-chain-instance:1:sha256-jcs-v1:378351854b8dd0c43b4b12c6d8f57f26e2614805ead0285a91ebc6416e432c3a"
+          },
+          "canonical": {
+            "chain_id": 1337,
+            "expected_genesis_hash": "0x1111111111111111111111111111111111111111111111111111111111111111"
+          }
+        }
+      },
+      "native": {
+        "value_ref": {
+          "content_digest": "content:sha256-v1:3b692a8eecf810f94571abb57554ad5198b51f3a2d019bc624df99f946440165",
+          "schema_id": "schema:mfm.evm-block-point:1:sha256-jcs-v1:4e6f07320b60e354512fffe73f039d1b9f00202cf0964fd3d7995c1035ee828f"
+        },
+        "canonical": {
+          "hash": "0x2222222222222222222222222222222222222222222222222222222222222222",
+          "number": "7"
+        }
+      }
+    },
+    "original": {
+      "value_ref": {
+        "content_digest": "content:sha256-v1:af16ad4e9d935abec3277f857ca5c277e76d1405c96a43bddd8ef4d0ea1681e3",
+        "schema_id": "schema:mfm.experiment-effect-custody-receipt:1:sha256-jcs-v1:4d1dcc989c55a2104c683ef112ac16d7d29c9500ea7fea1f66de297500045ed1"
+      },
+      "canonical": {
+        "native_command_ref": {
+          "content_digest": "content:sha256-v1:b5ce46f852383ad97d74948ff7045067283db425d326df178ae884f42ebfc383",
+          "schema_id": "schema:mfm.evm-eip1559-transaction-command:1:sha256-jcs-v1:238fada95370980eebf597f62ab5b57a5beea218b86199c09096785e01cb2768"
+        },
+        "settlement": {
+          "effect_id": "effect:sha256-jcs-v1:7af47c2fd4e5287c057a48b43326598d3a35d3a54c9d6bbcf2cf8cca7c6788c9",
+          "nonce": 1,
+          "outcome": {
+            "kind": "called"
+          },
+          "receipt": {
+            "block_anchor": {
+              "hash": "0x2222222222222222222222222222222222222222222222222222222222222222",
+              "number": "7"
+            },
+            "transaction_hash": "0x4c07957fbef47588037dc84743a65bd6b0e0c82f34f3a17b467c19f3e7f6db85"
+          }
+        }
+      }
+    },
+    "result": {
+      "applied": {
+        "output": null
+      }
+    }
+  },
+  "observer_summary": {
+    "command_frame_digest": "content:sha256-v1:7dff75bb414e135d4a5965ac6d2eab92248fbbc3d2489199f9b03239b69ed2d8",
+    "command_frame_length": 6861,
+    "command_head": {
+      "head_digest": "content:sha256-v1:7dff75bb414e135d4a5965ac6d2eab92248fbbc3d2489199f9b03239b69ed2d8",
+      "head_sequence": 2,
+      "run_id": "run:sha256-jcs-v1:e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4",
+      "total_bytes": 16531
+    },
+    "retained_original_equals_output": true,
+    "settlement_frame_digest": "content:sha256-v1:96ee5746a28a057a25873786e049ac9c7e327110328727f9764688adf5096c0e",
+    "settlement_frame_length": 7850,
+    "settlement_head": {
+      "head_digest": "content:sha256-v1:96ee5746a28a057a25873786e049ac9c7e327110328727f9764688adf5096c0e",
+      "head_sequence": 3,
+      "run_id": "run:sha256-jcs-v1:e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4",
+      "total_bytes": 24381
+    },
+    "settlement_reconstruction_native_io_delta": [
+      0,
+      0,
+      0,
+      0
+    ]
+  },
+  "asserted_equalities": {
+    "command_before_and_after_settlement": true,
+    "stored_original_equals_output_original": true,
+    "effect_id_equals_acknowledged_command_authority": true,
+    "semantic_command_ref_equals_acknowledged_object": true
+  },
+  "old_control": {
+    "physical_reservation": {
+      "command_value_ref": {
+        "content_digest": "content:sha256-v1:4255e498f8e741ea8f24677395304aef17f41b5b5419e018c089a3cdcc9de7d7",
+        "schema_id": "schema:mfm.evm-eip1559-transaction-command:1:sha256-jcs-v1:238fada95370980eebf597f62ab5b57a5beea218b86199c09096785e01cb2768"
+      },
+      "domain": {
+        "authority_epoch": "AwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwM",
+        "chain_instance": {
+          "chain_id": 1337,
+          "expected_genesis_hash": "0x1111111111111111111111111111111111111111111111111111111111111111"
+        },
+        "sender": "0x6e5ec90bdd1c2a05fed28525f32026e202da7205"
+      },
+      "effect_id": "effect:sha256-jcs-v1:13e265eb6df75356703644fd876c7823af4e8df2ad07b6191c94c07e0bf750f7",
+      "nonce": 3
+    },
+    "public_effects": [
+      {
+        "command_ref": {
+          "content_digest": "content:sha256-v1:4255e498f8e741ea8f24677395304aef17f41b5b5419e018c089a3cdcc9de7d7",
+          "schema_id": "schema:mfm.evm-eip1559-transaction-command:1:sha256-jcs-v1:238fada95370980eebf597f62ab5b57a5beea218b86199c09096785e01cb2768"
+        },
+        "effect_id": "effect:sha256-jcs-v1:13e265eb6df75356703644fd876c7823af4e8df2ad07b6191c94c07e0bf750f7",
+        "position": {
+          "state": 0,
+          "visit": 0
+        }
+      },
+      {
+        "command_ref": {
+          "content_digest": "content:sha256-v1:43ee62e9af33d05b95310e257b8cfb00f2ece2c5f434188f7693b746d6f400fe",
+          "schema_id": "schema:mfm.evm-reserved-transaction:1:sha256-jcs-v1:f3966bc163108072ade62b9869ca6c326d8426f718e86676da9469c610457583"
+        },
+        "effect_id": "effect:sha256-jcs-v1:09c2600623b8470ed03fdf868f9bd2dab318c49ffd2484030e3b055e4ebe735c",
+        "position": {
+          "state": 1,
+          "visit": 1
+        }
+      },
+      {
+        "command_ref": {
+          "content_digest": "content:sha256-v1:26d2f30d0cb8c7235b37605447f95f5f78f7cdfede2d773bd8dfa613d935f73d",
+          "schema_id": "schema:mfm.chain-prepared-transaction:1:sha256-jcs-v1:2d8dec369ed6ea3ef992b5f0539b78702f1731ed5793445825639ce6b3ab931c"
+        },
+        "effect_id": "effect:sha256-jcs-v1:5ed0f9a0530b8a4fef74448bf9b5e966d993acc7c5a3215bdd44e630762ecd20",
+        "position": {
+          "state": 2,
+          "visit": 2
+        }
+      }
+    ],
+    "winning_hash": "0x80df65652e08b96bfc2f0029bd5f4e2b6e2ba058d6b4c4e1ec35da1323d5c237"
+  },
+  "partial_refusal": {
+    "original": {
+      "canonical": {},
+      "value_ref": {
+        "content_digest": "content:sha256-v1:44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        "schema_id": "schema:mfm.chain-addition-overflow:1:sha256-jcs-v1:a2857138bdaa15da532f1e83c091b41c51f1c6e2353b2c438f4bf07e1437b07d"
+      }
+    },
+    "effective": "115792089237316195423570985008687907853269984665640564039457584007913129639935",
+    "deployment_evidence": {
+      "command_ref": {
+        "content_digest": "content:sha256-v1:6185e77e65620418fb7597237f0e4c8ecf8b6be251df36e5cb66013c125cfa7c",
+        "schema_id": "schema:mfm.chain-deployment-request:1:sha256-jcs-v1:b66886f7f6d33d0e02a6e3b1378a5dcdb7f4a73401785aa5c4bf2fac635f2653"
+      },
+      "effect_id": "effect:sha256-jcs-v1:27f24a525e2133545bf4e92ee703d4e8f731db8007569330fc0cf20cd3a992b8",
+      "implementation_ref": {
+        "content_digest": "content:sha256-v1:46bc5e64c9cf4446b353a6c3b3aadcdfaf069659aa0f06965af0e73ba64f8943",
+        "schema_id": "schema:mfm-experiment-leaf:1:sha256-jcs-v1:0000000000000000000000000000000000000000000000000000000000000000"
+      },
+      "observed_at": {
+        "ledger": {
+          "native": {
+            "canonical": {
+              "chain_id": 1337,
+              "expected_genesis_hash": "0x1111111111111111111111111111111111111111111111111111111111111111"
+            },
+            "value_ref": {
+              "content_digest": "content:sha256-v1:631382515d55927815c267bef98959539ba9f4c814241dea9da98c053ef1a02c",
+              "schema_id": "schema:mfm.evm-chain-instance:1:sha256-jcs-v1:378351854b8dd0c43b4b12c6d8f57f26e2614805ead0285a91ebc6416e432c3a"
+            }
+          }
+        },
+        "native": {
+          "canonical": {
+            "hash": "0x2222222222222222222222222222222222222222222222222222222222222222",
+            "number": "7"
+          },
+          "value_ref": {
+            "content_digest": "content:sha256-v1:3b692a8eecf810f94571abb57554ad5198b51f3a2d019bc624df99f946440165",
+            "schema_id": "schema:mfm.evm-block-point:1:sha256-jcs-v1:4e6f07320b60e354512fffe73f039d1b9f00202cf0964fd3d7995c1035ee828f"
+          }
+        }
+      },
+      "original": {
+        "canonical": {
+          "native_command_ref": {
+            "content_digest": "content:sha256-v1:4255e498f8e741ea8f24677395304aef17f41b5b5419e018c089a3cdcc9de7d7",
+            "schema_id": "schema:mfm.evm-eip1559-transaction-command:1:sha256-jcs-v1:238fada95370980eebf597f62ab5b57a5beea218b86199c09096785e01cb2768"
+          },
+          "settlement": {
+            "effect_id": "effect:sha256-jcs-v1:27f24a525e2133545bf4e92ee703d4e8f731db8007569330fc0cf20cd3a992b8",
+            "nonce": 2,
+            "outcome": {
+              "kind": "created",
+              "value": {
+                "created_address": "0xedc45394e7b467f8c3e6779aa12134fc06fee0b7"
+              }
+            },
+            "receipt": {
+              "block_anchor": {
+                "hash": "0x2222222222222222222222222222222222222222222222222222222222222222",
+                "number": "7"
+              },
+              "transaction_hash": "0x01be708f0743ab29b30f77106b4bffa633556a82ba96d901f0d7047558a48437"
+            }
+          }
+        },
+        "value_ref": {
+          "content_digest": "content:sha256-v1:dc850bfa8f376c2d745c4a4359ca03a8787668864abbdc13abeeab4d1abffde1",
+          "schema_id": "schema:mfm.experiment-effect-custody-receipt:1:sha256-jcs-v1:4d1dcc989c55a2104c683ef112ac16d7d29c9500ea7fea1f66de297500045ed1"
+        }
+      },
+      "result": {
+        "applied": {
+          "output": {
+            "ledger": {
+              "native": {
+                "canonical": {
+                  "chain_id": 1337,
+                  "expected_genesis_hash": "0x1111111111111111111111111111111111111111111111111111111111111111"
+                },
+                "value_ref": {
+                  "content_digest": "content:sha256-v1:631382515d55927815c267bef98959539ba9f4c814241dea9da98c053ef1a02c",
+                  "schema_id": "schema:mfm.evm-chain-instance:1:sha256-jcs-v1:378351854b8dd0c43b4b12c6d8f57f26e2614805ead0285a91ebc6416e432c3a"
+                }
+              }
+            },
+            "native": {
+              "canonical": "0xedc45394e7b467f8c3e6779aa12134fc06fee0b7",
+              "value_ref": {
+                "content_digest": "content:sha256-v1:72668feb0eca2fad3e9ebf9e2b4f6668825531f39f9431eb621b040f3ef8b40c",
+                "schema_id": "schema:mfm.evm-address:1:sha256-jcs-v1:62ac7e52b8bd00da7f684795487a1faefc5d3b2536d50984fbcc884e0af88455"
+              }
+            }
+          }
+        }
+      },
+      "transaction": {
+        "ledger": {
+          "native": {
+            "canonical": {
+              "chain_id": 1337,
+              "expected_genesis_hash": "0x1111111111111111111111111111111111111111111111111111111111111111"
+            },
+            "value_ref": {
+              "content_digest": "content:sha256-v1:631382515d55927815c267bef98959539ba9f4c814241dea9da98c053ef1a02c",
+              "schema_id": "schema:mfm.evm-chain-instance:1:sha256-jcs-v1:378351854b8dd0c43b4b12c6d8f57f26e2614805ead0285a91ebc6416e432c3a"
+            }
+          }
+        },
+        "native": {
+          "canonical": "0x01be708f0743ab29b30f77106b4bffa633556a82ba96d901f0d7047558a48437",
+          "value_ref": {
+            "content_digest": "content:sha256-v1:c945230f1a238ffde71e2dd79404780469042de2831198c3c92caf50f13b008e",
+            "schema_id": "schema:mfm.evm-hash:1:sha256-jcs-v1:ac6987ba5dd6d4432514f834a5423e6602cf88e23e2f49f3bbaaedd4cd60cc23"
+          }
+        }
+      }
+    },
+    "requested": "115792089237316195423570985008687907853269984665640564039457584007913129639935",
+    "increment": "1",
+    "configuration_preparations": 0,
+    "typed_original": "AdditionOverflow",
+    "typed_exposed_input": "DeployedContract"
+  },
+  "retained_creation_winner": {
+    "effect_id": "effect:sha256-jcs-v1:c3e776b9a4f42c1cfb6592e6702d93ccb4b1407c766e2c2bb872d91d90784069",
+    "hash": "0xbc1d8a11530b99a88020e238ec58903fbbb3f89408d11cf476bb3fffa342227f",
+    "native_command_ref": {
+      "content_digest": "content:sha256-v1:4255e498f8e741ea8f24677395304aef17f41b5b5419e018c089a3cdcc9de7d7",
+      "schema_id": "schema:mfm.evm-eip1559-transaction-command:1:sha256-jcs-v1:238fada95370980eebf597f62ab5b57a5beea218b86199c09096785e01cb2768"
+    },
+    "nonce": 0,
+    "raw_length": 593,
+    "raw_sha256": "2aec57add03e8bce97f2b2fc0b11e7bea6e34759743bfecb80b74db7c1494e05"
+  }
+}

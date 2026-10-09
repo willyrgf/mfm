@@ -1,0 +1,127 @@
+# Independent extension execution record
+
+Assignment: gpt-6.1-sol, high (requested and accepted spawn assignment; no separate model
+introspection). Worktree: /tmp/mfm-simplification-specimen-a478fc34, baseline
+`a478fc341d993f3b9b747d72c53a6f027be41452`. Coordinator supplied shared holdings State and
+ScalarOwner baseline before this owner was executed. Initial construction lifecycle 4/4 and
+first-owner holdings 1/1 were reported passed before extension started. Those results are
+controls, not independent extension conclusions. Coordinator owns candidate checkpoint/diff.
+
+Predictions: /tmp/mfm-extension-predictions.md, before implementation. The initially inspected
+Portfolio fixture's symbolic other-ledger/fixed-test-point was refined to typed BookLedger book
+19/BookPoint sequence 117 after agreeing the concrete shared contract. Literal raw42/0 and
+native denomination0 premises and liability exclusion stayed unchanged. Shared first owner
+instead supplies scripted EVM anchored scalar holdings raw1e18/denomination18, two bindings
+route-a/b. The semantics shared is exact fungible holdings tuples (identity, amount, denomination,
+point), not equality of native identities, cross-protocol anchoring trust, or valuation.
+
+## Integration and changes
+
+Only extension-owned files changed:
+- crates/domains/evm/tests/simplification/extension.rs: 348 LOC native owner and fixture.
+- crates/domains/evm/tests/simplification_extension.rs: 538 LOC consuming tests, fixture input,
+  and deliberate hidden-specialization types.
+
+Shared tests/simplification/holdings.rs, the generic bridge, Runtime, Journal, Store, and first
+owner acquired no extension edits or protocol branch. The second owner has one Catalog native
+factory, distinct BookBinding, BookReceipt enum, BookFault+BookSource, and Arc<BookResource>
+attachment. Native identity types are BookLedger, BookAccount, BookPoint; native receipt entry
+BookLine preserves quantity/denomination/meaning. Test-only Reply and BookArgument own fixture
+response and independent provider-argument capture. Shared-State imports are exactly
+CollectionOutput, CollectionRequest, Holding, HoldingsObservation. Native owner imports
+AdapterError, ObservationPoint, ContentRef/StableId, NativeRead/NativeFuture, Classification/
+ClassifyError, MfmValue derive, InvocationDiagnostic/Object/Unsigned256, Serde and standard
+collections/atomic/Arc/Mutex. It does not import an EVM binding/provider/protocol implementation.
+
+This adds necessary native qualification, exact cause and original retention plus discriminating
+fixtures; no production layer is added or deleted. Specimen accounting is 886 LOC separately;
+production-code delta 0. Compatible first-owner bindings add declaration data, not factory code.
+
+## Executed command
+
+`nix develop -c cargo test -p mfm-evm --test simplification_extension -- --nocapture`
+Exit 0, 5 passed, 0 failed. Full log /tmp/mfm-extension.log. First attempts corrected ordinary
+prototype compiler issues (from_fields requires serializable reviewed cause and static operation),
+not architecture changes; initial compiler log /tmp/mfm-extension-first.log. An initially written
+local account-decoding mapper discarded a cause; it was removed before executable success:
+requested_accounts decodes before provider instrumentation and retains InvocationDiagnostic
+as Invariant, while remote qualification consumes already decoded keys.
+
+`nix develop -c rustfmt --edition 2021 --config skip_children=true
+crates/domains/evm/tests/simplification_extension.rs
+crates/domains/evm/tests/simplification/extension.rs`
+Exit 0. `git diff --check` exit 0. No broad gates selected by extension worker; coordinator owns
+verification selection and final exact candidate verification.
+
+## Observed claims and independent oracles
+
+1. Native extension locality: Supported at typed factory/current-wire seam. Native batch receipt
+   order empty,retained differs from request order retained,empty; output preserves exact requested
+   coverage/order and quantities42,0/denominations0,0. Both output targets/ledgers match request;
+   both native point bytes exactly `{"sequence":117}`. Native original is the entire reversed
+   snapshot enum. Predetermined literal JSON includes book19/sequence117/raw0 and42, checked against
+   output original bytes and independently loaded Store frame's read evidence Object. Request ref
+   comes from independently instrumented provider entry, never from the result projector. Output
+   leaf equals the selected Catalog leaf. Rebuilt Catalog/current-wire Program cold inspection
+   with a hostile wrong-point provider performs zero native calls; hot call count exactly1.
+   Evidence: /tmp/mfm-extension-success-frame.json.
+
+2. Native meaning/refusal: Supported for the fixture. Missing requested account2101 does not
+   become zero; duplicate account2102 is rejected before overwriting; liability2301 is not holdings;
+   wrong book2201/wrong point2202 do not become successful requested evidence. Each remote response
+   incurs exactly1 observed native invocation and yields exact BookFault JSON containing operation
+   collect_book_snapshot and nested source(stage remote_ingress, literal code/message). Actual
+   typed source chain remains present. Independently loaded stored original bytes equal literal
+   expectations and retained classification is Permanent. Cold read retains same exact original
+   and adds no invocation. Evidence fault frames /tmp/mfm-extension-fault-{2101,2102,2301,2201,2202}-frame.json.
+   A wrong local route or caller target meaning liability returns invocation failure with calls0
+   and underlying head sequence1 (admission only); no authenticated operational failure is invented.
+
+3. Resource ownership: Supported for selected one-State fixture. One Catalog installs ScalarOwner
+   and BookNative. A ResourceTable containing only ScalarResources cannot attach BookNative:
+   resource_owner_unavailable, Book attachments0/calls0 and Scalar arguments empty. With only owned
+   Arc<BookResource>, selected Book executes with attachments1/calls1 while unselected Scalar
+   resources are absent. No generic protocol dispatch or State changes are needed.
+
+4. Hidden specialization: Supported at experimental intrinsic-key/private-claim mechanism;
+   revision-trust limitation exposed. UnitState<1> and UnitState<2> share all actual stored
+   Input/Output/Failure/Request types and family IDs; UnitNative<1,false> and <2,false> share
+   Binding/Receipt/Fault types and adapter ID. Observation types UnitObservation<1> and <2> are
+   different and amount arithmetic42/1 vs42/2 changes output. Experimental descriptor excludes
+   Observation, and the full leaf keys are genuinely equal. Fresh double installation rejects
+   conflicting_owner with attachment0/provider0. Reconstructing a Catalog with only divisor2 under
+   unchanged IDs loads exact old Program bytes and NEW FRESH RunId execution produces21 instead
+   of42, with same original and selected leaf. This is not resumed old run/reprojection of an
+   acknowledged receipt; it establishes association accepts sole semantic replacement when
+   revision trust is violated. Revising adapter identity to @2 makes leaf distinct and old
+   document rejects leaf_unavailable before attachment. Existing NativeAbi contains identical
+   request/evidence contracts and copied experimental key; no Observation schema secretly
+   discriminates these variants. No executable-byte attestation or automatic restart detection
+   is claimed. Whole production target descriptor/association remains Unvalidated.
+
+## Independent review
+
+Adversarial reviewer read both owned modules, log and oracles. Reviewer accepted explicit absent
+versus zero, duplicate preprojection refusal, original/provider/Store oracle independence,
+local-vs-remote custody distinction, and equal-contract specialization discrimination. Reviewer
+required precise fresh-execution label for same-ID cold replacement and requested the executed
+mixed-Catalog wrong-resource table test. Coordinator records review's final consolidated outcome.
+
+## Material uncertainties
+
+- Assumption: whole collection is adequate product acknowledgement granularity. Why uncertain:
+  actual Portfolio durability stages alone establish no requirement for interrupted within-
+  collection results. Consequence: coarser Read could lose required progress. Validation: independent
+  consuming acceptance and completed/unfinished collection interruption; remain Unvalidated here.
+- Assumption: real native protocol can supply this fixture's complete fixed-snapshot holdings.
+  Why uncertain: both owner providers are scripted. Consequence: owner locality is not live trust,
+  anchoring, network interoperability or durability. Validation: selected real protocol/provider
+  capability tests before production support.
+- Assumption: production target leaf descriptor/association will preserve exercised identity facts.
+  Why uncertain: key is experimental and wrapped in current Programv9 NativeAbi. Consequence:
+  whole target cold qualification is not certified. Validation: complete target descriptor and
+  cold restoration acceptance; this result supports only implemented provisional key/claim mechanism.
+- Assumption: semantic IDs are revised when behavior changes. Why uncertain: IDs identify reviewed
+  semantics rather than executable bytes. Consequence: sole unchanged-ID replacement is accepted
+  and changes result, as actually executed. Validation: revision discipline/review and available-
+  revision rejection; executable attestation is a separate project.
